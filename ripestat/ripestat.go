@@ -7,8 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +20,9 @@ import (
 // DefaultBaseURL is the announced-prefixes endpoint of the RIPE Stat API.
 const DefaultBaseURL = "https://stat.ripe.net/data/announced-prefixes/data.json"
 
+// DefaultCacheTTL is how long fetched responses are reused from the cache.
+const DefaultCacheTTL = time.Hour
+
 // Client queries the RIPE Stat data API.
 type Client struct {
 	// HTTPClient is used for requests. When nil, a client with a 30s timeout
@@ -24,11 +30,35 @@ type Client struct {
 	HTTPClient *http.Client
 	// BaseURL overrides the API endpoint. When empty, DefaultBaseURL is used.
 	BaseURL string
+	// CacheDir is where fetched responses are stored. When empty, caching is
+	// disabled.
+	CacheDir string
+	// CacheTTL is the maximum age of a cached response. When zero, caching is
+	// disabled.
+	CacheTTL time.Duration
 }
 
-// New returns a Client with sensible defaults.
+// New returns a Client with sensible defaults, including a cache under
+// $XDG_CACHE_HOME/full-reverse/ripestat (or ~/.cache/full-reverse/ripestat).
 func New() *Client {
-	return &Client{HTTPClient: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		CacheDir:   DefaultCacheDir(),
+		CacheTTL:   DefaultCacheTTL,
+	}
+}
+
+// DefaultCacheDir returns the platform cache directory for ripestat data, or an
+// empty string when it cannot be determined.
+func DefaultCacheDir() string {
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		return filepath.Join(dir, "full-reverse", "ripestat")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "full-reverse", "ripestat")
 }
 
 type announcedPrefixesResponse struct {
@@ -43,11 +73,18 @@ type announcedPrefixesResponse struct {
 }
 
 // AnnouncedPrefixes returns the deduplicated IPv4 prefixes currently announced
-// by asn. IPv6 prefixes and malformed entries are ignored.
+// by asn. IPv6 prefixes and malformed entries are ignored. A cached response
+// younger than CacheTTL is reused when caching is enabled.
 func (c *Client) AnnouncedPrefixes(ctx context.Context, asn string) ([]netip.Prefix, error) {
 	resource, err := NormalizeASN(asn)
 	if err != nil {
 		return nil, err
+	}
+
+	if body, ok := c.readCache(resource); ok {
+		if prefixes, err := parseAnnouncedPrefixes(body); err == nil {
+			return prefixes, nil
+		}
 	}
 
 	base := c.BaseURL
@@ -76,8 +113,24 @@ func (c *Client) AnnouncedPrefixes(ctx context.Context, asn string) ([]netip.Pre
 		return nil, fmt.Errorf("ripestat: unexpected HTTP status %s", resp.Status)
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ripestat: reading response: %w", err)
+	}
+
+	prefixes, err := parseAnnouncedPrefixes(body)
+	if err != nil {
+		return nil, err
+	}
+	c.writeCache(resource, body)
+	return prefixes, nil
+}
+
+// parseAnnouncedPrefixes validates an announced-prefixes response body and
+// extracts its IPv4 prefixes.
+func parseAnnouncedPrefixes(body []byte) ([]netip.Prefix, error) {
 	var payload announcedPrefixesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("ripestat: decoding response: %w", err)
 	}
 	if payload.Status != "ok" {
@@ -99,6 +152,61 @@ func (c *Client) AnnouncedPrefixes(ctx context.Context, asn string) ([]netip.Pre
 		prefixes = append(prefixes, p)
 	}
 	return prefixes, nil
+}
+
+// cachePath returns the cache file for resource, or an empty string when
+// caching is disabled.
+func (c *Client) cachePath(resource string) string {
+	if c.CacheDir == "" || c.CacheTTL <= 0 {
+		return ""
+	}
+	return filepath.Join(c.CacheDir, resource+".json")
+}
+
+// readCache returns a cached response body if one exists and is still fresh.
+func (c *Client) readCache(resource string) ([]byte, bool) {
+	path := c.cachePath(resource)
+	if path == "" {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || time.Since(info.ModTime()) > c.CacheTTL {
+		return nil, false
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+// writeCache stores a response body in the cache. Failures are ignored; the
+// cache is best-effort.
+func (c *Client) writeCache(resource string, body []byte) {
+	path := c.cachePath(resource)
+	if path == "" {
+		return
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+
+	tmp, err := os.CreateTemp(dir, resource+".*.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // best-effort cleanup; a no-op after rename
+
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	os.Rename(tmpName, path)
 }
 
 // NormalizeASN validates asn and returns it in canonical "AS<number>" form.

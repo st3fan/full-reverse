@@ -43,6 +43,15 @@ IPv6 prefixes are ignored and duplicates are removed; the fetched prefixes are
 scanned in addition to any explicit CIDRs. ASNs accept `AS15169`, `as15169`, or
 `15169`.
 
+### ASN response cache
+
+RIPE Stat responses are cached for one hour (hardcoded) under
+`$XDG_CACHE_HOME/full-reverse/ripestat`, or `~/.cache/full-reverse/ripestat`
+when `XDG_CACHE_HOME` is unset. Each ASN is stored as `AS<number>.json` and
+reused while it is younger than the TTL; expired entries are refetched and
+overwritten. Caching is best-effort: unreadable or corrupt cache files are
+ignored and never fail a run.
+
 Queries bypass the libc/NSS path and are sent directly to DNS servers. When no
 `-d` is given, nameservers are read from `/etc/resolv.conf` and tried in order.
 When multiple `-d` servers are given, lookups are assigned to them in
