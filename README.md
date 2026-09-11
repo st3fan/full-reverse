@@ -28,6 +28,7 @@ comments, and comma/whitespace separated values are accepted.
 | `-c` | `32` | number of concurrent reverse lookups |
 | `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
 | `-t` | `2.5s` | timeout per attempt |
+| `-forward-confirmed-only` | `false` | only report PTR records that forward-confirm (see below) |
 
 Only IPv4 CIDRs are supported. Targets iterate over the whole prefix,
 including the network and broadcast addresses. CIDRs and ASNs may be mixed
@@ -62,6 +63,20 @@ A failed lookup is retried up to `-r` times (so the default of `4` means at
 most 5 attempts). Each attempt has its own `-t` timeout. NXDOMAIN / no-such-host
 responses are never retried.
 
+### Forward-confirmed PTR records
+
+With `-forward-confirmed-only`, each PTR record is validated with a forward
+lookup:
+
+1. Reverse lookup: `192.0.2.10` → PTR → `mail.example.com`
+2. Forward confirmation: `mail.example.com` → A → does it include `192.0.2.10`?
+
+Only names whose A records map back to the original IP are reported. When an IP
+has several PTR names, the confirmed ones are kept and the rest dropped; if none
+confirm, the IP is counted as `unconfirmed` and no record is emitted. Forward
+lookups use the same resolver, timeout, and retry settings as the reverse
+lookup. NXDOMAIN or a failed forward lookup counts as not confirmed.
+
 ## Output
 
 JSONL on stdout. Progress and a final summary are logged to stderr, each line
@@ -69,9 +84,9 @@ prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone.
 The run starts with a line stating how many IPs will be looked up. Each ASN
 expands to a line listing all of its announced IPv4 prefixes. For runs larger
 than a /24, an intermediate progress line is emitted for every 256 IPs scanned,
-and the run ends with counts of resolved, PTR-less, and failed lookups. A final
-metrics line is then logged for each DNS resolver, reporting the number of
-requests it handled, resolver errors, and average response time.
+and the run ends with counts of resolved, PTR-less, unconfirmed, and failed
+lookups. A final metrics line is then logged for each DNS resolver, reporting
+the number of requests it handled, resolver errors, and average response time.
 `ptr` is always an array (possibly empty). Addresses with no PTR record
 (NXDOMAIN / no such host) are skipped silently; `error` is only present for
 real lookup failures such as timeouts or SERVFAIL.

@@ -56,23 +56,18 @@ func (d *dnsResolver) record(elapsed time.Duration, failed bool) {
 	}
 }
 
-// lookupPTR performs a single PTR lookup for ip, trying each configured server
-// in order. It returns errNotFound when the name does not exist.
-func (d *dnsResolver) lookupPTR(ctx context.Context, ip netip.Addr) ([]string, error) {
-	reverse, err := dns.ReverseAddr(ip.String())
-	if err != nil {
-		return nil, err
-	}
-
+// query performs a single DNS question, trying each configured server in
+// order. It returns errNotFound when the name does not exist.
+func (d *dnsResolver) query(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
 	msg := new(dns.Msg)
-	msg.SetQuestion(reverse, dns.TypePTR)
+	msg.SetQuestion(dns.Fqdn(name), qtype)
 	msg.RecursionDesired = true
 
 	var lastErr error
 	for _, server := range d.servers {
-		names, err := d.exchange(ctx, msg, server)
+		resp, err := d.exchange(ctx, msg, server)
 		if err == nil {
-			return names, nil
+			return resp, nil
 		}
 		if errors.Is(err, errNotFound) {
 			return nil, errNotFound
@@ -83,8 +78,8 @@ func (d *dnsResolver) lookupPTR(ctx context.Context, ip netip.Addr) ([]string, e
 }
 
 // exchange sends msg to server over UDP, retrying over TCP if the response is
-// truncated, and maps the response to PTR names.
-func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string) ([]string, error) {
+// truncated, and maps the response code to an error.
+func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string) (*dns.Msg, error) {
 	resp, _, err := d.udp.ExchangeContext(ctx, msg, server)
 	if err != nil {
 		return nil, fmt.Errorf("query %s on %s: %w", msg.Question[0].Name, server, err)
@@ -98,18 +93,38 @@ func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string)
 
 	switch resp.Rcode {
 	case dns.RcodeSuccess:
-		names := make([]string, 0, len(resp.Answer))
-		for _, rr := range resp.Answer {
-			if ptr, ok := rr.(*dns.PTR); ok {
-				names = append(names, strings.TrimSuffix(ptr.Ptr, "."))
-			}
-		}
-		return names, nil
+		return resp, nil
 	case dns.RcodeNameError:
 		return nil, errNotFound
 	default:
 		return nil, fmt.Errorf("query %s on %s: %s", msg.Question[0].Name, server, dns.RcodeToString[resp.Rcode])
 	}
+}
+
+// ptrNames extracts PTR targets from a response, without trailing dots.
+func ptrNames(resp *dns.Msg) []string {
+	names := make([]string, 0, len(resp.Answer))
+	for _, rr := range resp.Answer {
+		if ptr, ok := rr.(*dns.PTR); ok {
+			names = append(names, strings.TrimSuffix(ptr.Ptr, "."))
+		}
+	}
+	return names
+}
+
+// aRecords extracts IPv4 addresses from a response.
+func aRecords(resp *dns.Msg) []netip.Addr {
+	addrs := make([]netip.Addr, 0, len(resp.Answer))
+	for _, rr := range resp.Answer {
+		a, ok := rr.(*dns.A)
+		if !ok {
+			continue
+		}
+		if addr, ok := netip.AddrFromSlice(a.A); ok {
+			addrs = append(addrs, addr.Unmap())
+		}
+	}
+	return addrs
 }
 
 // stringList is a repeatable string flag.
@@ -124,13 +139,15 @@ func (s *stringList) Set(v string) error {
 
 func main() {
 	var (
-		dnsServers  stringList
-		concurrency int
-		retries     int
-		timeout     time.Duration
+		dnsServers           stringList
+		forwardConfirmedOnly bool
+		concurrency          int
+		retries              int
+		timeout              time.Duration
 	)
 
 	flag.Var(&dnsServers, "d", "DNS server to use (e.g. 8.8.8.8:53); repeatable, defaults to system resolver")
+	flag.BoolVar(&forwardConfirmedOnly, "forward-confirmed-only", false, "only report PTR records whose name resolves back to the same IP")
 	flag.IntVar(&concurrency, "c", 32, "number of concurrent reverse lookups")
 	flag.IntVar(&retries, "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
 	flag.DurationVar(&timeout, "t", 2500*time.Millisecond, "per-attempt lookup timeout")
@@ -174,7 +191,7 @@ func main() {
 	logf("looking up %d IPs across %d CIDR(s)", total, len(prefixes))
 
 	start := time.Now()
-	var scanned, resolved, notFound, failed atomic.Uint64
+	var scanned, resolved, notFound, unconfirmed, failed atomic.Uint64
 	var rr atomic.Uint64
 
 	sem := make(chan struct{}, concurrency)
@@ -193,7 +210,14 @@ func main() {
 				idx := rr.Add(1) - 1
 				dr := resolvers[idx%uint64(len(resolvers))]
 
-				names, err := lookupWithRetries(ctx, dr, ip, timeout, retries)
+				reverse, err := dns.ReverseAddr(ip.String())
+				if err != nil {
+					failed.Add(1)
+					emit(Result{IP: ip.String(), PTR: []string{}, Error: err.Error()})
+					return
+				}
+
+				resp, err := lookupWithRetries(ctx, dr, reverse, dns.TypePTR, timeout, retries)
 				if err != nil {
 					// A missing PTR record is expected and not interesting; skip it.
 					if errors.Is(err, errNotFound) {
@@ -205,25 +229,38 @@ func main() {
 					return
 				}
 
-				res := Result{IP: ip.String(), PTR: []string{}}
-				// Trim trailing dots for cleaner output.
-				for _, n := range names {
-					res.PTR = append(res.PTR, strings.TrimSuffix(n, "."))
+				names := ptrNames(resp)
+
+				// Forward confirmation: keep only names whose A record maps back
+				// to the queried IP.
+				if forwardConfirmedOnly {
+					confirmed := names[:0]
+					for _, name := range names {
+						if forwardConfirms(ctx, dr, name, ip, timeout, retries) {
+							confirmed = append(confirmed, name)
+						}
+					}
+					names = confirmed
+					if len(names) == 0 {
+						unconfirmed.Add(1)
+						return
+					}
 				}
-				if len(res.PTR) > 0 {
-					resolved.Add(1)
-				} else {
+
+				if len(names) == 0 {
 					notFound.Add(1)
+					return
 				}
-				emit(res)
+				resolved.Add(1)
+				emit(Result{IP: ip.String(), PTR: names})
 			}()
 		}
 	}
 
 	wg.Wait()
 
-	logf("done: %d IPs looked up, %d resolved, %d without PTR, %d failed in %s",
-		total, resolved.Load(), notFound.Load(), failed.Load(),
+	logf("done: %d IPs looked up, %d resolved, %d without PTR, %d unconfirmed, %d failed in %s",
+		total, resolved.Load(), notFound.Load(), unconfirmed.Load(), failed.Load(),
 		time.Since(start).Round(time.Millisecond))
 
 	for _, dr := range resolvers {
@@ -237,20 +274,20 @@ func main() {
 	}
 }
 
-// lookupWithRetries performs a reverse lookup for one IP, retrying timeouts
-// and other non-NXDOMAIN errors up to retries times. Each attempt gets its own
-// timeout. The returned error is the last one seen; NXDOMAIN is returned
-// immediately without retrying. Per-attempt timing is recorded on dr.
-func lookupWithRetries(ctx context.Context, dr *dnsResolver, ip netip.Addr, timeout time.Duration, retries int) ([]string, error) {
+// lookupWithRetries performs a DNS query, retrying timeouts and other
+// non-NXDOMAIN errors up to retries times. Each attempt gets its own timeout.
+// The returned error is the last one seen; NXDOMAIN is returned immediately
+// without retrying. Per-attempt timing is recorded on dr.
+func lookupWithRetries(ctx context.Context, dr *dnsResolver, name string, qtype uint16, timeout time.Duration, retries int) (*dns.Msg, error) {
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
 		lctx, cancel := context.WithTimeout(ctx, timeout)
 		begin := time.Now()
-		names, err := dr.lookupPTR(lctx, ip)
+		resp, err := dr.query(lctx, name, qtype)
 		cancel()
 		dr.record(time.Since(begin), err != nil && !errors.Is(err, errNotFound))
 		if err == nil {
-			return names, nil
+			return resp, nil
 		}
 		if errors.Is(err, errNotFound) {
 			return nil, err
@@ -258,6 +295,20 @@ func lookupWithRetries(ctx context.Context, dr *dnsResolver, ip netip.Addr, time
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+// forwardConfirms reports whether name resolves (A) to ip.
+func forwardConfirms(ctx context.Context, dr *dnsResolver, name string, ip netip.Addr, timeout time.Duration, retries int) bool {
+	resp, err := lookupWithRetries(ctx, dr, name, dns.TypeA, timeout, retries)
+	if err != nil {
+		return false
+	}
+	for _, a := range aRecords(resp) {
+		if a == ip {
+			return true
+		}
+	}
+	return false
 }
 
 // outMu serializes writes to stdout and stderr so that concurrently emitted
