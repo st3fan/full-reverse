@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/st3fan/full-reverse/ripestat"
 )
 
 const defaultDNSPort = "53"
@@ -143,6 +145,9 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	inputs, err := readInputs(flag.Args())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -155,11 +160,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Parse all CIDRs up front.
-	prefixes, err := parseCIDRs(inputs)
+	// Expand the mixed list of CIDRs and ASNs into IPv4 prefixes.
+	prefixes, err := resolveTargets(ctx, inputs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -299,11 +301,11 @@ func logf(format string, args ...any) {
 	outMu.Unlock()
 }
 
-// readInputs reads CIDRs from the given arguments, or from stdin if none are
-// provided. An argument that names an existing file is read as a list of
-// CIDRs; any other argument is treated as a literal CIDR. In files, multiple
-// whitespace/comma separated values per line are accepted, and comments
-// starting with '#' are ignored.
+// readInputs reads CIDRs and ASNs from the given arguments, or from stdin if
+// none are provided. An argument that names an existing file is read as a list
+// of targets; any other argument is treated as a literal CIDR or ASN. In
+// files, multiple whitespace/comma separated values per line are accepted, and
+// comments starting with '#' are ignored.
 func readInputs(args []string) ([]string, error) {
 	var inputs []string
 
@@ -356,17 +358,50 @@ func scanCIDRs(r io.Reader, inputs []string) ([]string, error) {
 	return inputs, nil
 }
 
-func parseCIDRs(inputs []string) ([]netip.Prefix, error) {
+// resolveTargets converts a mixed list of CIDRs and ASNs into IPv4 prefixes.
+// ASNs ("AS15169", "as15169", or bare "15169") are expanded to their announced
+// prefixes via the RIPE Stat API.
+func resolveTargets(ctx context.Context, inputs []string) ([]netip.Prefix, error) {
 	var prefixes []netip.Prefix
+	var asns []string
+
 	for _, in := range inputs {
-		p, err := netip.ParsePrefix(in)
-		if err != nil {
-			return nil, fmt.Errorf("invalid CIDR %q: %w", in, err)
+		if p, err := netip.ParsePrefix(in); err == nil {
+			if !p.Addr().Is4() {
+				return nil, fmt.Errorf("only IPv4 CIDRs are supported: %q", in)
+			}
+			prefixes = append(prefixes, p)
+			continue
 		}
-		if !p.Addr().Is4() {
-			return nil, fmt.Errorf("only IPv4 CIDRs are supported: %q", in)
+		if _, err := ripestat.NormalizeASN(in); err == nil {
+			asns = append(asns, in)
+			continue
 		}
-		prefixes = append(prefixes, p)
+		return nil, fmt.Errorf("invalid CIDR or ASN %q", in)
+	}
+
+	if len(asns) > 0 {
+		client := ripestat.New()
+		for _, asn := range asns {
+			resource, err := ripestat.NormalizeASN(asn)
+			if err != nil {
+				return nil, err
+			}
+			announced, err := client.AnnouncedPrefixes(ctx, resource)
+			if err != nil {
+				return nil, err
+			}
+			list := make([]string, len(announced))
+			for i, p := range announced {
+				list[i] = p.String()
+			}
+			logf("%s: %d announced IPv4 prefix(es): %s", resource, len(announced), strings.Join(list, ", "))
+			prefixes = append(prefixes, announced...)
+		}
+	}
+
+	if len(prefixes) == 0 {
+		return nil, fmt.Errorf("no CIDRs or ASNs provided")
 	}
 	return prefixes, nil
 }

@@ -1,9 +1,9 @@
 # full-reverse
 
-Reverse-DNS (PTR) lookup tool for IPv4 CIDR ranges. It expands each CIDR,
-performs a reverse lookup for every address using
-github.com/miekg/dns, and writes one JSON object per address (JSONL) to
-stdout.
+Reverse-DNS (PTR) lookup tool for IPv4 CIDR ranges and ASNs. It expands each
+CIDR (or every announced prefix of an ASN), performs a reverse lookup for every
+address using github.com/miekg/dns, and writes one JSON object per address
+(JSONL) to stdout.
 
 ## Build
 
@@ -14,13 +14,13 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|FILE...]
+full-reverse [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|ASN|FILE...]
 ```
 
-CIDRs may be passed as arguments, read from files, or piped on stdin. An
-argument that names a readable file is read as a list of CIDRs; otherwise it
-is treated as a literal CIDR. In files and stdin, blank lines, `#` comments,
-and comma/whitespace separated values are accepted.
+Targets may be passed as arguments, read from files, or piped on stdin. An
+argument that names a readable file is read as a list of targets; otherwise it
+is treated as a literal CIDR or ASN. In files and stdin, blank lines, `#`
+comments, and comma/whitespace separated values are accepted.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
@@ -30,7 +30,18 @@ and comma/whitespace separated values are accepted.
 | `-t` | `2.5s` | timeout per attempt |
 
 Only IPv4 CIDRs are supported. Targets iterate over the whole prefix,
-including the network and broadcast addresses.
+including the network and broadcast addresses. CIDRs and ASNs may be mixed
+freely:
+
+```sh
+full-reverse 1.1.1.0/24 AS15348
+```
+
+An ASN is expanded to its currently announced prefixes from the
+[RIPE Stat announced-prefixes API](https://stat.ripe.net/docs/data-api/api-endpoints/announced-prefixes).
+IPv6 prefixes are ignored and duplicates are removed; the fetched prefixes are
+scanned in addition to any explicit CIDRs. ASNs accept `AS15169`, `as15169`, or
+`15169`.
 
 Queries bypass the libc/NSS path and are sent directly to DNS servers. When no
 `-d` is given, nameservers are read from `/etc/resolv.conf` and tried in order.
@@ -46,11 +57,12 @@ responses are never retried.
 
 JSONL on stdout. Progress and a final summary are logged to stderr, each line
 prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone.
-The run starts with a line stating how many IPs will be looked up. For runs
-larger than a /24, an intermediate progress line is emitted for every 256 IPs
-scanned, and the run ends with counts of resolved, PTR-less, and failed
-lookups. A final metrics line is then logged for each DNS resolver, reporting
-the number of requests it handled, resolver errors, and average response time.
+The run starts with a line stating how many IPs will be looked up. Each ASN
+expands to a line listing all of its announced IPv4 prefixes. For runs larger
+than a /24, an intermediate progress line is emitted for every 256 IPs scanned,
+and the run ends with counts of resolved, PTR-less, and failed lookups. A final
+metrics line is then logged for each DNS resolver, reporting the number of
+requests it handled, resolver errors, and average response time.
 `ptr` is always an array (possibly empty). Addresses with no PTR record
 (NXDOMAIN / no such host) are skipped silently; `error` is only present for
 real lookup failures such as timeouts or SERVFAIL.
