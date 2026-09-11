@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,7 +15,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/miekg/dns"
 )
+
+const defaultDNSPort = "53"
+
+// errNotFound indicates the name does not exist (NXDOMAIN).
+var errNotFound = errors.New("no such host")
 
 // Result is one JSONL record emitted per IP address.
 type Result struct {
@@ -23,11 +31,14 @@ type Result struct {
 	Error string   `json:"error,omitempty"`
 }
 
-// dnsResolver wraps a resolver with a display name and per-resolver metrics.
+// dnsResolver wraps one or more upstream servers with a display name and
+// per-resolver metrics. A resolver with multiple servers (the system
+// configuration) tries them in order until one answers.
 type dnsResolver struct {
-	name      string // label for log output
-	errServer string // server reported in DNSError messages; empty for system
-	r         *net.Resolver
+	name    string
+	servers []string
+	udp     *dns.Client
+	tcp     *dns.Client
 
 	requests atomic.Uint64
 	errors   atomic.Uint64
@@ -40,6 +51,62 @@ func (d *dnsResolver) record(elapsed time.Duration, failed bool) {
 	d.totalNs.Add(int64(elapsed))
 	if failed {
 		d.errors.Add(1)
+	}
+}
+
+// lookupPTR performs a single PTR lookup for ip, trying each configured server
+// in order. It returns errNotFound when the name does not exist.
+func (d *dnsResolver) lookupPTR(ctx context.Context, ip netip.Addr) ([]string, error) {
+	reverse, err := dns.ReverseAddr(ip.String())
+	if err != nil {
+		return nil, err
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(reverse, dns.TypePTR)
+	msg.RecursionDesired = true
+
+	var lastErr error
+	for _, server := range d.servers {
+		names, err := d.exchange(ctx, msg, server)
+		if err == nil {
+			return names, nil
+		}
+		if errors.Is(err, errNotFound) {
+			return nil, errNotFound
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// exchange sends msg to server over UDP, retrying over TCP if the response is
+// truncated, and maps the response to PTR names.
+func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string) ([]string, error) {
+	resp, _, err := d.udp.ExchangeContext(ctx, msg, server)
+	if err != nil {
+		return nil, fmt.Errorf("query %s on %s: %w", msg.Question[0].Name, server, err)
+	}
+	if resp.Truncated {
+		resp, _, err = d.tcp.ExchangeContext(ctx, msg, server)
+		if err != nil {
+			return nil, fmt.Errorf("query %s on %s (tcp): %w", msg.Question[0].Name, server, err)
+		}
+	}
+
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		names := make([]string, 0, len(resp.Answer))
+		for _, rr := range resp.Answer {
+			if ptr, ok := rr.(*dns.PTR); ok {
+				names = append(names, strings.TrimSuffix(ptr.Ptr, "."))
+			}
+		}
+		return names, nil
+	case dns.RcodeNameError:
+		return nil, errNotFound
+	default:
+		return nil, fmt.Errorf("query %s on %s: %s", msg.Question[0].Name, server, dns.RcodeToString[resp.Rcode])
 	}
 }
 
@@ -82,7 +149,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	resolvers := buildResolvers(dnsServers)
+	resolvers, err := buildResolvers(dnsServers, timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -123,7 +194,7 @@ func main() {
 				names, err := lookupWithRetries(ctx, dr, ip, timeout, retries)
 				if err != nil {
 					// A missing PTR record is expected and not interesting; skip it.
-					if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
+					if errors.Is(err, errNotFound) {
 						notFound.Add(1)
 						return
 					}
@@ -173,25 +244,16 @@ func lookupWithRetries(ctx context.Context, dr *dnsResolver, ip netip.Addr, time
 	for attempt := 0; attempt <= retries; attempt++ {
 		lctx, cancel := context.WithTimeout(ctx, timeout)
 		begin := time.Now()
-		names, err := dr.r.LookupAddr(lctx, ip.String())
+		names, err := dr.lookupPTR(lctx, ip)
 		cancel()
+		dr.record(time.Since(begin), err != nil && !errors.Is(err, errNotFound))
 		if err == nil {
-			dr.record(time.Since(begin), false)
 			return names, nil
 		}
-		if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
-			// NXDOMAIN is a valid response, not a resolver error.
-			dr.record(time.Since(begin), false)
+		if errors.Is(err, errNotFound) {
 			return nil, err
 		}
-		dr.record(time.Since(begin), true)
 		lastErr = err
-	}
-
-	// Go reports the resolv.conf server in DNSErrors even when a custom Dial
-	// is used; correct it to the server we queried.
-	if dnsErr, ok := lastErr.(*net.DNSError); ok && dr.errServer != "" {
-		dnsErr.Server = dr.errServer
 	}
 	return nil, lastErr
 }
@@ -310,10 +372,14 @@ func parseCIDRs(inputs []string) ([]netip.Prefix, error) {
 }
 
 // buildResolvers builds one dnsResolver per -d value, or a single resolver
-// backed by the system configuration when none were given.
-func buildResolvers(addrs []string) []*dnsResolver {
+// backed by the system nameservers when none were given.
+func buildResolvers(addrs []string, timeout time.Duration) ([]*dnsResolver, error) {
 	if len(addrs) == 0 {
-		return []*dnsResolver{{name: "system", r: net.DefaultResolver}}
+		servers, err := systemServers()
+		if err != nil {
+			return nil, err
+		}
+		return []*dnsResolver{newDNSResolver("system", servers, timeout)}, nil
 	}
 
 	resolvers := make([]*dnsResolver, 0, len(addrs))
@@ -321,17 +387,34 @@ func buildResolvers(addrs []string) []*dnsResolver {
 		addr := a
 		// Accept both "host" and "host:port" forms.
 		if _, _, err := net.SplitHostPort(addr); err != nil {
-			addr = net.JoinHostPort(addr, "53")
+			addr = net.JoinHostPort(addr, defaultDNSPort)
 		}
-
-		resolver := &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				d := net.Dialer{}
-				return d.DialContext(ctx, network, addr)
-			},
-		}
-		resolvers = append(resolvers, &dnsResolver{name: addr, errServer: addr, r: resolver})
+		resolvers = append(resolvers, newDNSResolver(addr, []string{addr}, timeout))
 	}
-	return resolvers
+	return resolvers, nil
+}
+
+// systemServers returns the nameservers from /etc/resolv.conf as host:port.
+func systemServers() ([]string, error) {
+	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err != nil {
+		return nil, fmt.Errorf("reading /etc/resolv.conf: %w", err)
+	}
+	servers := make([]string, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		servers = append(servers, net.JoinHostPort(s, cfg.Port))
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no nameservers found in /etc/resolv.conf")
+	}
+	return servers, nil
+}
+
+func newDNSResolver(name string, servers []string, timeout time.Duration) *dnsResolver {
+	return &dnsResolver{
+		name:    name,
+		servers: servers,
+		udp:     &dns.Client{Net: "udp", Timeout: timeout, DialTimeout: timeout},
+		tcp:     &dns.Client{Net: "tcp", Timeout: timeout, DialTimeout: timeout},
+	}
 }

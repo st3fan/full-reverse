@@ -1,8 +1,9 @@
 # full-reverse
 
 Reverse-DNS (PTR) lookup tool for IPv4 CIDR ranges. It expands each CIDR,
-performs a reverse lookup for every address, and writes one JSON object per
-address (JSONL) to stdout.
+performs a reverse lookup for every address using
+github.com/miekg/dns, and writes one JSON object per address (JSONL) to
+stdout.
 
 ## Build
 
@@ -23,7 +24,7 @@ and comma/whitespace separated values are accepted.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
-| `-d` | system resolver | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
+| `-d` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
 | `-c` | `32` | number of concurrent reverse lookups |
 | `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
 | `-t` | `2.5s` | timeout per attempt |
@@ -31,8 +32,11 @@ and comma/whitespace separated values are accepted.
 Only IPv4 CIDRs are supported. Targets iterate over the whole prefix,
 including the network and broadcast addresses.
 
+Queries bypass the libc/NSS path and are sent directly to DNS servers. When no
+`-d` is given, nameservers are read from `/etc/resolv.conf` and tried in order.
 When multiple `-d` servers are given, lookups are assigned to them in
-round-robin order; retries stay on the assigned server.
+round-robin order; retries stay on the assigned server. Truncated UDP responses
+are retried over TCP.
 
 A failed lookup is retried up to `-r` times (so the default of `4` means at
 most 5 attempts). Each attempt has its own `-t` timeout. NXDOMAIN / no-such-host
