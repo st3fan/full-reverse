@@ -140,6 +140,7 @@ func (s *stringList) Set(v string) error {
 func main() {
 	var (
 		dnsServers           stringList
+		inputFiles           stringList
 		forwardConfirmedOnly bool
 		concurrency          int
 		retries              int
@@ -147,6 +148,8 @@ func main() {
 	)
 
 	flag.Var(&dnsServers, "d", "DNS server to use (e.g. 8.8.8.8:53); repeatable, defaults to system resolver")
+	flag.Var(&inputFiles, "i", "read prefixes/ASNs from a file, one per line; use - for stdin")
+	flag.Var(&inputFiles, "input", "read prefixes/ASNs from a file, one per line; use - for stdin")
 	flag.BoolVar(&forwardConfirmedOnly, "forward-confirmed-only", false, "only report PTR records whose name resolves back to the same IP")
 	flag.IntVar(&concurrency, "c", 32, "number of concurrent reverse lookups")
 	flag.IntVar(&retries, "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
@@ -165,7 +168,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	inputs, err := readInputs(flag.Args())
+	inputs, err := readInputs(flag.Args(), inputFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -352,29 +355,47 @@ func logf(format string, args ...any) {
 	outMu.Unlock()
 }
 
-// readInputs reads CIDRs and ASNs from the given arguments, or from stdin if
-// none are provided. An argument that names an existing file is read as a list
-// of targets; any other argument is treated as a literal CIDR or ASN. In
-// files, multiple whitespace/comma separated values per line are accepted, and
-// comments starting with '#' are ignored.
-func readInputs(args []string) ([]string, error) {
+// readInputs collects targets from explicit input files, positional arguments,
+// and (when nothing else is given) stdin. Values in input files and stdin are
+// one CIDR or ASN per line, though whitespace/comma separated values and '#'
+// comments are also accepted. A positional argument that names an existing
+// file is read as a list of targets; any other positional argument is treated
+// as a literal CIDR or ASN. An input file of "-" reads stdin.
+func readInputs(args, inputFiles []string) ([]string, error) {
 	var inputs []string
 
-	if len(args) == 0 {
-		inputs, err := scanCIDRs(os.Stdin, inputs)
+	for _, path := range inputFiles {
+		if path == "-" {
+			var err error
+			inputs, err = scanCIDRs(os.Stdin, inputs)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("opening input file %q: %w", path, err)
+		}
+		inputs, err = scanCIDRs(f, inputs)
+		f.Close()
 		if err != nil {
 			return nil, err
 		}
-		if len(inputs) == 0 {
-			return nil, fmt.Errorf("no CIDRs provided")
-		}
-		return inputs, nil
 	}
 
 	for _, arg := range args {
+		if arg == "-" {
+			var err error
+			inputs, err = scanCIDRs(os.Stdin, inputs)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		f, err := os.Open(arg)
 		if err != nil {
-			// Not a readable file: treat the argument as a literal CIDR.
+			// Not a readable file: treat the argument as a literal CIDR or ASN.
 			inputs = append(inputs, arg)
 			continue
 		}
@@ -385,8 +406,17 @@ func readInputs(args []string) ([]string, error) {
 		}
 	}
 
+	// With no explicit sources, read the target list from stdin.
+	if len(args) == 0 && len(inputFiles) == 0 {
+		var err error
+		inputs, err = scanCIDRs(os.Stdin, inputs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if len(inputs) == 0 {
-		return nil, fmt.Errorf("no CIDRs provided")
+		return nil, fmt.Errorf("no CIDRs or ASNs provided")
 	}
 	return inputs, nil
 }

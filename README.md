@@ -14,16 +14,20 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|ASN|FILE...]
+full-reverse [-i FILE]... [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|ASN|FILE...]
 ```
 
-Targets may be passed as arguments, read from files, or piped on stdin. An
-argument that names a readable file is read as a list of targets; otherwise it
-is treated as a literal CIDR or ASN. In files and stdin, blank lines, `#`
-comments, and comma/whitespace separated values are accepted.
+Targets may be passed as arguments, read from files, or piped on stdin. Use
+`-i FILE` (or `-input FILE`) to read a list with one prefix or ASN per line;
+`-i -` reads that list from stdin. The flag may be repeated. A positional
+argument that names a readable file is also read as a list of targets;
+otherwise it is treated as a literal CIDR or ASN (a positional `-` reads
+stdin). In files and stdin, blank lines, `#` comments, and comma/whitespace
+separated values are accepted.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
+| `-i`, `-input` | – | read prefixes/ASNs from a file, one per line; use `-` for stdin; may be repeated |
 | `-d` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
 | `-c` | `32` | number of concurrent reverse lookups |
 | `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
