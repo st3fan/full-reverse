@@ -5,18 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	flag "github.com/spf13/pflag"
 
 	"github.com/st3fan/full-reverse/ripestat"
 )
@@ -249,6 +250,8 @@ type stringList []string
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }
 
+func (s *stringList) Type() string { return "string" }
+
 func (s *stringList) Set(v string) error {
 	*s = append(*s, v)
 	return nil
@@ -265,17 +268,24 @@ func main() {
 		timeout              time.Duration
 	)
 
-	flag.Var(&dnsServers, "d", "DNS server to use (e.g. 8.8.8.8:53); repeatable, defaults to system resolver")
-	flag.Var(&inputFiles, "i", "read targets from a file, one per line; use - for stdin")
-	flag.Var(&inputFiles, "input", "read targets from a file, one per line; use - for stdin")
-	flag.BoolVar(&quiet, "q", false, "silence progress and summary logging")
-	flag.BoolVar(&quiet, "quiet", false, "silence progress and summary logging")
-	flag.BoolVar(&lookupAS, "a", false, "look up the announcing ASN for IPs whose ASN is not already known")
-	flag.BoolVar(&lookupAS, "lookup-as", false, "look up the announcing ASN for IPs whose ASN is not already known")
-	flag.BoolVar(&forwardConfirmedOnly, "forward-confirmed-only", false, "only report PTR records whose name resolves back to the same IP")
-	flag.IntVar(&concurrency, "c", 32, "number of concurrent reverse lookups")
-	flag.IntVar(&retries, "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
-	flag.DurationVar(&timeout, "t", 2500*time.Millisecond, "per-attempt lookup timeout")
+	flag.VarP(&dnsServers, "dns-server", "d", "DNS server to use (e.g. 8.8.8.8:53); repeatable, defaults to system resolver")
+	flag.VarP(&inputFiles, "input", "i", "read targets from a file, one per line; use - for stdin")
+	flag.BoolVarP(&quiet, "quiet", "q", false, "silence progress and summary logging")
+	flag.BoolVarP(&lookupAS, "lookup-as", "a", false, "look up the announcing ASN for IPs whose ASN is not already known")
+	flag.BoolVarP(&forwardConfirmedOnly, "forward-confirmed-only", "f", false, "only report PTR records whose name resolves back to the same IP")
+	flag.IntVarP(&concurrency, "concurrency", "c", 32, "number of concurrent reverse lookups")
+	flag.IntVarP(&retries, "retries", "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
+	flag.DurationVarP(&timeout, "timeout", "t", 2500*time.Millisecond, "per-attempt lookup timeout")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] [target...]\n", filepath.Base(os.Args[0]))
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Targets are IPv4 CIDRs, IPs, ASNs (AS15169), AS names (AMAZON-AES), or files containing them.")
+		fmt.Fprintln(os.Stderr, "A target of - reads targets from stdin.")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Options:")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	if concurrency < 1 {

@@ -14,12 +14,16 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-i FILE]... [-a] [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [-q] [CIDR|IP|ASN|AS-NAME|FILE...]
+full-reverse [OPTIONS] [CIDR|IP|ASN|AS-NAME|FILE...]
 ```
+
+Every option has a short and a long form (e.g. `-d` / `--dns-server`), and
+options may appear before or after positional targets. Run `full-reverse -h`
+to list them.
 
 Targets may be passed as arguments, read from files, or piped on stdin. A
 plain IP such as `1.1.1.1` is treated as a `/32` prefix. Use `-i FILE` (or
-`-input FILE`) to read a list with one target per line; `-i -` reads that list
+`--input FILE`) to read a list with one target per line; `-i -` reads that list
 from stdin. The flag may be repeated. A positional argument that names a
 readable file is also read as a list of targets; otherwise it is treated as a
 literal CIDR, IP, ASN, or AS name (a positional `-` reads stdin). In files and
@@ -28,14 +32,14 @@ accepted.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
-| `-i`, `-input` | – | read targets from a file, one per line; use `-` for stdin; may be repeated |
-| `-a`, `-lookup-as` | `false` | look up the announcing ASN for IPs whose ASN is not already known |
-| `-d` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
-| `-c` | `32` | number of concurrent reverse lookups |
-| `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
-| `-t` | `2.5s` | timeout per attempt |
-| `-q`, `-quiet` | `false` | silence progress and summary logging |
-| `-forward-confirmed-only` | `false` | only report PTR records that forward-confirm (see below) |
+| `-i`, `--input` | – | read targets from a file, one per line; use `-` for stdin; may be repeated |
+| `-a`, `--lookup-as` | `false` | look up the announcing ASN for IPs whose ASN is not already known |
+| `-d`, `--dns-server` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
+| `-c`, `--concurrency` | `32` | number of concurrent reverse lookups |
+| `-r`, `--retries` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
+| `-t`, `--timeout` | `2.5s` | timeout per attempt |
+| `-q`, `--quiet` | `false` | silence progress and summary logging |
+| `-f`, `--forward-confirmed-only` | `false` | only report PTR records that forward-confirm (see below) |
 
 Only IPv4 is supported; plain IPs are treated as `/32`. Targets iterate over
 the whole prefix, including the network and broadcast addresses. CIDRs, IPs,
@@ -60,7 +64,7 @@ candidate list; use an AS number in that case.
 ### Looking up an IP's ASN
 
 By default, the `asn` field is `null`, or the announcing AS number when the
-IP's prefix was expanded from an ASN. With `-a`/`-lookup-as`, an IP whose ASN
+IP's prefix was expanded from an ASN. With `-a`/`--lookup-as`, an IP whose ASN
 is not already known is resolved via the
 [RIPE Stat prefix-overview API](https://stat.ripe.net/docs/data-api/api-endpoints/prefix-overview)
 and the result is added to the numeric `asn` field. Whenever the ASN is known,
@@ -117,7 +121,7 @@ responses are never retried.
 
 ### Forward-confirmed PTR records
 
-With `-forward-confirmed-only`, each PTR record is validated with a forward
+With `-f`/`--forward-confirmed-only`, each PTR record is validated with a forward
 lookup:
 
 1. Reverse lookup: `192.0.2.10` → PTR → `mail.example.com`
@@ -133,7 +137,7 @@ lookup. NXDOMAIN or a failed forward lookup counts as not confirmed.
 
 JSONL on stdout. Progress and a final summary are logged to stderr, each line
 prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone;
-`-q`/`-quiet` silences these log lines (fatal errors are still printed).
+`-q`/`--quiet` silences these log lines (fatal errors are still printed).
 The run starts with a line stating how many IPs will be looked up. Each ASN
 expands to a line listing all of its announced IPv4 prefixes. For runs larger
 than a /24, an intermediate progress line is emitted for every 256 IPs scanned,
