@@ -24,6 +24,9 @@ const DefaultBaseURL = "https://stat.ripe.net/data/announced-prefixes/data.json"
 // DefaultPrefixOverviewURL is the prefix-overview endpoint of the RIPE Stat API.
 const DefaultPrefixOverviewURL = "https://stat.ripe.net/data/prefix-overview/data.json"
 
+// DefaultASOverviewURL is the as-overview endpoint of the RIPE Stat API.
+const DefaultASOverviewURL = "https://stat.ripe.net/data/as-overview/data.json"
+
 // DefaultCacheTTL is how long fetched responses are reused from the cache.
 const DefaultCacheTTL = time.Hour
 
@@ -37,6 +40,9 @@ type Client struct {
 	// PrefixOverviewURL overrides the prefix-overview endpoint. When empty,
 	// DefaultPrefixOverviewURL is used.
 	PrefixOverviewURL string
+	// ASOverviewURL overrides the as-overview endpoint. When empty,
+	// DefaultASOverviewURL is used.
+	ASOverviewURL string
 	// CacheDir is where fetched responses are stored. When empty, caching is
 	// disabled.
 	CacheDir string
@@ -61,6 +67,7 @@ func New() *Client {
 	return &Client{
 		HTTPClient:        &http.Client{Timeout: 30 * time.Second},
 		PrefixOverviewURL: DefaultPrefixOverviewURL,
+		ASOverviewURL:     DefaultASOverviewURL,
 		CacheDir:          DefaultCacheDir(),
 		CacheTTL:          DefaultCacheTTL,
 	}
@@ -179,8 +186,10 @@ func parseAnnouncedPrefixes(body []byte) ([]netip.Prefix, error) {
 type PrefixOverview struct {
 	// Prefix is the covering prefix reported by RIPE Stat, if any.
 	Prefix netip.Prefix
-	// ASN is the first announcing AS in canonical "AS<number>" form, or empty.
-	ASN string
+	// ASN is the first announcing AS number, or 0 when unknown.
+	ASN uint32
+	// ASName is the holder of the first announcing AS, or empty.
+	ASName string
 	// Announced reports whether the prefix is currently announced.
 	Announced bool
 }
@@ -192,7 +201,8 @@ type prefixOverviewResponse struct {
 		Resource  string `json:"resource"`
 		Announced bool   `json:"announced"`
 		ASNs      []struct {
-			ASN uint32 `json:"asn"`
+			ASN    uint32 `json:"asn"`
+			Holder string `json:"holder"`
 		} `json:"asns"`
 	} `json:"data"`
 }
@@ -265,9 +275,92 @@ func parsePrefixOverview(body []byte) (*PrefixOverview, error) {
 		overview.Prefix = p.Masked()
 	}
 	if len(payload.Data.ASNs) > 0 {
-		overview.ASN = "AS" + strconv.FormatUint(uint64(payload.Data.ASNs[0].ASN), 10)
+		overview.ASN = payload.Data.ASNs[0].ASN
+		overview.ASName = payload.Data.ASNs[0].Holder
 	}
 	return overview, nil
+}
+
+type asOverviewResponse struct {
+	Status     string `json:"status"`
+	StatusCode int    `json:"status_code"`
+	Data       struct {
+		Holder string `json:"holder"`
+	} `json:"data"`
+}
+
+// ASOverview returns the holder (name) of an ASN. It uses the as-overview data
+// API and reuses a cached response when caching is enabled.
+func (c *Client) ASOverview(ctx context.Context, asn string) (string, error) {
+	resource, err := NormalizeASN(asn)
+	if err != nil {
+		return "", err
+	}
+
+	cacheKey := asOverviewCacheKey(resource)
+	if body, ok := c.readCache(cacheKey); ok {
+		if name, err := parseASOverview(body); err == nil {
+			c.logf("using cached AS overview for %s", resource)
+			return name, nil
+		}
+	}
+
+	base := c.ASOverviewURL
+	if base == "" {
+		base = DefaultASOverviewURL
+	}
+
+	endpoint := base + "?resource=" + url.QueryEscape(resource)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("ripestat: building request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	c.logf("Fetching %s", endpoint)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ripestat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ripestat: unexpected HTTP status %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("ripestat: reading response: %w", err)
+	}
+
+	name, err := parseASOverview(body)
+	if err != nil {
+		return "", err
+	}
+	c.writeCache(cacheKey, body)
+	return name, nil
+}
+
+// parseASOverview validates an as-overview response body and returns the holder.
+func parseASOverview(body []byte) (string, error) {
+	var payload asOverviewResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("ripestat: decoding response: %w", err)
+	}
+	if payload.Status != "ok" {
+		return "", fmt.Errorf("ripestat: API status %q (HTTP %d)", payload.Status, payload.StatusCode)
+	}
+	return payload.Data.Holder, nil
+}
+
+// asOverviewCacheKey returns the cache key for an as-overview resource.
+func asOverviewCacheKey(asn string) string {
+	return filepath.Join("as-overview", asn)
 }
 
 // overviewCacheKey returns the cache key for a prefix-overview resource,
@@ -279,11 +372,11 @@ func overviewCacheKey(resource string) string {
 }
 
 // CachedPrefixASNs reads every cached announced-prefixes response and returns a
-// map from prefix to the announcing ASN. It is best-effort: unreadable or
+// map from prefix to the announcing AS number. It is best-effort: unreadable or
 // malformed cache files are skipped. An empty map is returned when caching is
 // disabled or the cache directory does not exist.
-func (c *Client) CachedPrefixASNs() map[netip.Prefix]string {
-	result := make(map[netip.Prefix]string)
+func (c *Client) CachedPrefixASNs() map[netip.Prefix]uint32 {
+	result := make(map[netip.Prefix]uint32)
 	if c.CacheDir == "" {
 		return result
 	}
@@ -298,8 +391,8 @@ func (c *Client) CachedPrefixASNs() map[netip.Prefix]string {
 		if entry.IsDir() || !strings.HasPrefix(name, "AS") || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		asn := strings.TrimSuffix(name, ".json")
-		if _, err := NormalizeASN(asn); err != nil {
+		asn, err := ASNNumber(strings.TrimSuffix(name, ".json"))
+		if err != nil {
 			continue
 		}
 
@@ -373,6 +466,20 @@ func (c *Client) writeCache(resource string, body []byte) {
 		return
 	}
 	os.Rename(tmpName, path)
+}
+
+// ASNNumber returns the numeric value of an ASN given as "AS15169", "as15169",
+// or "15169".
+func ASNNumber(asn string) (uint32, error) {
+	canonical, err := NormalizeASN(asn)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseUint(canonical[2:], 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("ripestat: invalid ASN %q", asn)
+	}
+	return uint32(n), nil
 }
 
 // NormalizeASN validates asn and returns it in canonical "AS<number>" form.

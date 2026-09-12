@@ -52,19 +52,21 @@ scanned in addition to any explicit CIDRs. ASNs accept `AS15169`, `as15169`, or
 
 ### Looking up an IP's ASN
 
-By default, the `asn` field is `null`, or the announcing ASN when the IP's
-prefix was expanded from an ASN. With `-a`/`-lookup-as`, an IP whose ASN is not
-already known is resolved via the
+By default, the `asn` field is `null`, or the announcing AS number when the
+IP's prefix was expanded from an ASN. With `-a`/`-lookup-as`, an IP whose ASN
+is not already known is resolved via the
 [RIPE Stat prefix-overview API](https://stat.ripe.net/docs/data-api/api-endpoints/prefix-overview)
-and the result is added to the `asn` field. If RIPE Stat returns no ASN (for
-example an unannounced address), the field stays `null`:
+and the result is added to the numeric `asn` field. Whenever the ASN is known,
+the AS holder is resolved (via as-overview) and reported in `as_name`. If RIPE
+Stat returns no ASN (for example an unannounced address), both fields stay
+`null`:
 
 ```sh
 $ full-reverse -a 8.8.8.8
-{"ip":"8.8.8.8","prefix":"8.8.8.8/32","asn":"AS15169","ptr":["dns.google"]}
+{"ip":"8.8.8.8","prefix":"8.8.8.8/32","asn":15169,"as_name":"GOOGLE - Google LLC","ptr":["dns.google"]}
 
 $ full-reverse -a 192.0.2.1
-{"ip":"192.0.2.1","prefix":"192.0.2.1/32","asn":null,"ptr":["bogon.example.test"]}
+{"ip":"192.0.2.1","prefix":"192.0.2.1/32","asn":null,"as_name":null,"ptr":["bogon.example.test"]}
 ```
 
 Before calling the API, the tool loads every cached announced-prefixes
@@ -88,6 +90,7 @@ entries are refetched and overwritten. Two kinds of responses are stored:
 
 - announced-prefixes results as `AS<number>.json`
 - prefix-overview results as `overview/<resource>.json`
+- as-overview results as `as-overview/AS<number>.json`
 
 Caching is best-effort: unreadable or corrupt cache files are ignored and
 never fail a run.
@@ -128,16 +131,17 @@ and the run ends with counts of resolved, PTR-less, unconfirmed, and failed
 lookups. A final metrics line is then logged for each DNS resolver, reporting
 the number of requests it handled, resolver errors, and average response time.
 `ptr` is always an array (possibly empty). Each record carries the `prefix` it
-came from and an `asn` field (`null` when unknown).
+came from, an `asn` field, and an `as_name` field. Both are `null` when
+unknown; `asn` is numeric (e.g. `15169`, not `"AS15169"`).
 Addresses with no PTR record (NXDOMAIN / no such host) are skipped silently;
 `error` is only present for real lookup failures such as timeouts or SERVFAIL.
 
 ```sh
 $ echo '1.1.1.0/30' | ./full-reverse -d 1.1.1.1 -d 8.8.8.8 -c 4
 2026-09-11T14:35:20-04:00 looking up 4 IPs across 1 CIDR(s)
-{"ip":"1.1.1.1","prefix":"1.1.1.0/30","asn":null,"ptr":["one.one.one.one"]}
-{"ip":"1.1.1.2","prefix":"1.1.1.0/30","asn":null,"ptr":["security.cloudflare-dns.com"]}
-{"ip":"1.1.1.3","prefix":"1.1.1.0/30","asn":null,"ptr":["family.cloudflare-dns.com"]}
+{"ip":"1.1.1.1","prefix":"1.1.1.0/30","asn":null,"as_name":null,"ptr":["one.one.one.one"]}
+{"ip":"1.1.1.2","prefix":"1.1.1.0/30","asn":null,"as_name":null,"ptr":["security.cloudflare-dns.com"]}
+{"ip":"1.1.1.3","prefix":"1.1.1.0/30","asn":null,"as_name":null,"ptr":["family.cloudflare-dns.com"]}
 2026-09-11T14:35:20-04:00 done: 4 IPs looked up, 3 resolved, 1 without PTR, 0 unconfirmed, 0 failed in 17ms
 2026-09-11T14:35:20-04:00 resolver 1.1.1.1:53: 2 request(s), 0 error(s), avg response 16.12ms
 2026-09-11T14:35:20-04:00 resolver 8.8.8.8:53: 2 request(s), 0 error(s), avg response 15.811ms
@@ -146,5 +150,5 @@ $ echo '1.1.1.0/30' | ./full-reverse -d 1.1.1.1 -d 8.8.8.8 -c 4
 When scanning an AS, the `asn` field identifies the source, e.g.:
 
 ```json
-{"ip":"193.0.19.4","prefix":"193.0.18.0/23","asn":"AS3333","ptr":["web.admindns.ripe.net"]}
+{"ip":"193.0.19.4","prefix":"193.0.18.0/23","asn":3333,"as_name":"RIPE-NCC-AS Reseaux IP Europeens Network Coordination Centre (RIPE NCC)","ptr":["web.admindns.ripe.net"]}
 ```

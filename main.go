@@ -30,7 +30,8 @@ var errNotFound = errors.New("no such host")
 type Result struct {
 	IP     string   `json:"ip"`
 	Prefix string   `json:"prefix"`
-	ASN    *string  `json:"asn"`
+	ASN    *uint32  `json:"asn"`
+	ASName *string  `json:"as_name"`
 	PTR    []string `json:"ptr"`
 	Error  string   `json:"error,omitempty"`
 }
@@ -38,7 +39,8 @@ type Result struct {
 // target is one prefix to scan together with where it came from.
 type target struct {
 	prefix netip.Prefix
-	asn    string // announcing ASN, empty for explicitly provided CIDRs
+	asn    uint32 // announcing AS number, 0 for explicitly provided CIDRs
+	asName string // announcing AS holder, empty when unknown
 }
 
 // dnsResolver wraps one or more upstream servers with a display name and
@@ -140,15 +142,15 @@ func aRecords(resp *dns.Msg) []netip.Addr {
 // supernet, so a /0 entry matches every address.
 type asnIndex struct {
 	mu    sync.RWMutex
-	byNet map[netip.Prefix]string
+	byNet map[netip.Prefix]uint32
 }
 
 func newASNIndex() *asnIndex {
-	return &asnIndex{byNet: make(map[netip.Prefix]string)}
+	return &asnIndex{byNet: make(map[netip.Prefix]uint32)}
 }
 
-func (x *asnIndex) add(p netip.Prefix, asn string) {
-	if asn == "" || !p.IsValid() {
+func (x *asnIndex) add(p netip.Prefix, asn uint32) {
+	if asn == 0 || !p.IsValid() {
 		return
 	}
 	p = p.Masked()
@@ -159,8 +161,9 @@ func (x *asnIndex) add(p netip.Prefix, asn string) {
 	x.mu.Unlock()
 }
 
-// lookup returns the ASN of the most specific known prefix containing addr.
-func (x *asnIndex) lookup(addr netip.Addr) (string, bool) {
+// lookup returns the AS number of the most specific known prefix containing
+// addr, or 0 when there is no match.
+func (x *asnIndex) lookup(addr netip.Addr) (uint32, bool) {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
 	for bits := addr.BitLen(); bits >= 0; bits-- {
@@ -169,39 +172,70 @@ func (x *asnIndex) lookup(addr netip.Addr) (string, bool) {
 			return asn, true
 		}
 	}
-	return "", false
+	return 0, false
 }
 
-// asnResolver determines the announcing ASN for an IP. It consults prefixes
-// already known from the cache or AS targets before calling RIPE Stat, and
-// records learned prefixes so later lookups are free.
+// asnResolver determines the announcing AS (number and name) for an IP. It
+// consults prefixes already known from the cache or AS targets before calling
+// RIPE Stat, and records learned prefixes so later lookups are free.
 type asnResolver struct {
 	client *ripestat.Client
 	index  *asnIndex
 	mu     sync.Mutex // serializes API lookups and avoids duplicate work
+	names  map[uint32]string
 }
 
-func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) string {
-	if asn, ok := r.index.lookup(ip); ok {
-		return asn
-	}
-
+// resolve returns the AS number and holder for ip, or 0/"" when unknown. All
+// lookups are serialized, which also avoids duplicate API calls for the same
+// prefix.
+func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Another goroutine may have resolved this prefix while we waited.
-	if asn, ok := r.index.lookup(ip); ok {
-		return asn
-	}
 
-	overview, err := r.client.PrefixOverview(ctx, ip.String())
+	asn, _ := r.index.lookup(ip)
+	if asn == 0 {
+		overview, err := r.client.PrefixOverview(ctx, ip.String())
+		if err != nil {
+			logf("warning: AS lookup for %s failed: %v", ip, err)
+			return 0, ""
+		}
+		asn = overview.ASN
+		if overview.Prefix.IsValid() {
+			r.index.add(overview.Prefix, overview.ASN)
+		}
+		if asn != 0 && overview.ASName != "" {
+			r.rememberLocked(asn, overview.ASName)
+			return asn, overview.ASName
+		}
+	}
+	if asn == 0 {
+		return 0, ""
+	}
+	return asn, r.nameLocked(ctx, asn)
+}
+
+// nameLocked returns the holder of asn, consulting the in-memory map and then
+// the as-overview API (which is itself cached on disk). The caller must hold
+// r.mu.
+func (r *asnResolver) nameLocked(ctx context.Context, asn uint32) string {
+	if name, ok := r.names[asn]; ok {
+		return name
+	}
+	name, err := r.client.ASOverview(ctx, fmt.Sprintf("AS%d", asn))
 	if err != nil {
-		logf("warning: AS lookup for %s failed: %v", ip, err)
+		logf("warning: AS overview lookup for AS%d failed: %v", asn, err)
 		return ""
 	}
-	if overview.Prefix.IsValid() {
-		r.index.add(overview.Prefix, overview.ASN)
+	r.rememberLocked(asn, name)
+	return name
+}
+
+// rememberLocked records an AS name. The caller must hold r.mu.
+func (r *asnResolver) rememberLocked(asn uint32, name string) {
+	if r.names == nil {
+		r.names = make(map[uint32]string)
 	}
-	return overview.ASN
+	r.names[asn] = name
 }
 
 // stringList is a repeatable string flag.
@@ -281,7 +315,7 @@ func main() {
 			index.add(p, asn)
 		}
 		for _, t := range targets {
-			if t.asn != "" {
+			if t.asn != 0 {
 				index.add(t.prefix, t.asn)
 			}
 		}
@@ -314,13 +348,21 @@ func main() {
 
 				res := Result{IP: ip.String(), Prefix: t.prefix.String(), PTR: []string{}}
 
-				if t.asn != "" {
+				if t.asn != 0 {
 					asn := t.asn
 					res.ASN = &asn
+					if t.asName != "" {
+						name := t.asName
+						res.ASName = &name
+					}
 				} else if asnRes != nil {
-					// A lookup that yields nothing leaves ASN nil, i.e. JSON null.
-					if asn := asnRes.resolve(ctx, ip); asn != "" {
+					// A lookup that yields nothing leaves the fields nil, i.e. null.
+					asn, name := asnRes.resolve(ctx, ip)
+					if asn != 0 {
 						res.ASN = &asn
+					}
+					if name != "" {
+						res.ASName = &name
 					}
 				}
 
@@ -601,6 +643,14 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			if err != nil {
 				return nil, err
 			}
+			number, err := ripestat.ASNNumber(resource)
+			if err != nil {
+				return nil, err
+			}
+			name, err := client.ASOverview(ctx, resource)
+			if err != nil {
+				return nil, err
+			}
 			announced, err := client.AnnouncedPrefixes(ctx, resource)
 			if err != nil {
 				return nil, err
@@ -611,7 +661,7 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			}
 			logf("%s: %d announced IPv4 prefix(es): %s", resource, len(announced), strings.Join(list, ", "))
 			for _, p := range announced {
-				targets = append(targets, target{prefix: p, asn: resource})
+				targets = append(targets, target{prefix: p, asn: number, asName: name})
 			}
 		}
 	}

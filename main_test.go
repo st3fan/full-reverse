@@ -29,30 +29,30 @@ func TestResolveTargets(t *testing.T) {
 		if targets[i].prefix != want[i] {
 			t.Errorf("target[%d] prefix = %v, want %v", i, targets[i].prefix, want[i])
 		}
-		if targets[i].asn != "" {
-			t.Errorf("target[%d] asn = %q, want empty", i, targets[i].asn)
+		if targets[i].asn != 0 {
+			t.Errorf("target[%d] asn = %d, want 0", i, targets[i].asn)
 		}
 	}
 }
 
 func TestASNIndex(t *testing.T) {
 	x := newASNIndex()
-	x.add(netip.MustParsePrefix("10.0.0.0/8"), "AS1")
-	x.add(netip.MustParsePrefix("10.1.0.0/16"), "AS2")
+	x.add(netip.MustParsePrefix("10.0.0.0/8"), 1)
+	x.add(netip.MustParsePrefix("10.1.0.0/16"), 2)
 
 	tests := []struct {
 		ip      string
-		wantASN string
+		wantASN uint32
 		wantOK  bool
 	}{
-		{ip: "10.1.2.3", wantASN: "AS2", wantOK: true}, // most specific match
-		{ip: "10.2.3.4", wantASN: "AS1", wantOK: true}, // supernet match
-		{ip: "11.0.0.1", wantASN: "", wantOK: false},   // no match
+		{ip: "10.1.2.3", wantASN: 2, wantOK: true},  // most specific match
+		{ip: "10.2.3.4", wantASN: 1, wantOK: true},  // supernet match
+		{ip: "11.0.0.1", wantASN: 0, wantOK: false}, // no match
 	}
 	for _, tt := range tests {
 		asn, ok := x.lookup(netip.MustParseAddr(tt.ip))
 		if ok != tt.wantOK || asn != tt.wantASN {
-			t.Errorf("lookup(%s) = (%q, %v), want (%q, %v)", tt.ip, asn, ok, tt.wantASN, tt.wantOK)
+			t.Errorf("lookup(%s) = (%d, %v), want (%d, %v)", tt.ip, asn, ok, tt.wantASN, tt.wantOK)
 		}
 	}
 }
@@ -62,17 +62,21 @@ func TestResultASNMarshaling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(unknown), `"asn":null`) {
-		t.Errorf("unknown ASN marshaled as %s, want \"asn\":null", unknown)
+	if !strings.Contains(string(unknown), `"asn":null`) || !strings.Contains(string(unknown), `"as_name":null`) {
+		t.Errorf("unknown AS marshaled as %s, want null asn and as_name", unknown)
 	}
 
-	asn := "AS15169"
-	known, err := json.Marshal(Result{IP: "8.8.8.8", Prefix: "8.8.8.8/32", ASN: &asn, PTR: []string{"dns.google"}})
+	asn := uint32(15169)
+	name := "GOOGLE - Google LLC"
+	known, err := json.Marshal(Result{IP: "8.8.8.8", Prefix: "8.8.8.8/32", ASN: &asn, ASName: &name, PTR: []string{"dns.google"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(known), `"asn":"AS15169"`) {
-		t.Errorf("known ASN marshaled as %s, want \"asn\":\"AS15169\"", known)
+	if !strings.Contains(string(known), `"asn":15169`) {
+		t.Errorf("known ASN marshaled as %s, want \"asn\":15169", known)
+	}
+	if !strings.Contains(string(known), `"as_name":"GOOGLE - Google LLC"`) {
+		t.Errorf("known AS name not found in %s", known)
 	}
 }
 

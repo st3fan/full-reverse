@@ -128,8 +128,8 @@ func TestPrefixOverviewCache(t *testing.T) {
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
-		if ov.ASN != "AS15169" {
-			t.Fatalf("call %d: asn = %q, want AS15169", i, ov.ASN)
+		if ov.ASN != 15169 {
+			t.Fatalf("call %d: asn = %d, want 15169", i, ov.ASN)
 		}
 	}
 
@@ -199,11 +199,76 @@ func TestPrefixOverview(t *testing.T) {
 	if want := netip.MustParsePrefix("8.8.8.0/24"); ov.Prefix != want {
 		t.Errorf("prefix = %v, want %v", ov.Prefix, want)
 	}
-	if ov.ASN != "AS15169" {
-		t.Errorf("asn = %q, want %q", ov.ASN, "AS15169")
+	if ov.ASN != 15169 {
+		t.Errorf("asn = %d, want 15169", ov.ASN)
+	}
+	if ov.ASName != "Google LLC" {
+		t.Errorf("as name = %q, want %q", ov.ASName, "Google LLC")
 	}
 	if !ov.Announced {
 		t.Error("announced = false, want true")
+	}
+}
+
+func TestASNNumber(t *testing.T) {
+	tests := []struct {
+		in   string
+		want uint32
+	}{
+		{in: "15169", want: 15169},
+		{in: "AS15169", want: 15169},
+		{in: "as3333", want: 3333},
+	}
+	for _, tt := range tests {
+		got, err := ASNNumber(tt.in)
+		if err != nil {
+			t.Errorf("ASNNumber(%q): %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ASNNumber(%q) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+	if _, err := ASNNumber("not-an-asn"); err == nil {
+		t.Error("ASNNumber(\"not-an-asn\") = nil error, want error")
+	}
+}
+
+func TestASOverview(t *testing.T) {
+	var hits atomic.Int64
+	var gotResource string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		gotResource = r.URL.Query().Get("resource")
+		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"holder":"GOOGLE - Google LLC"}}`)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	client := &Client{
+		HTTPClient:    server.Client(),
+		ASOverviewURL: server.URL,
+		CacheDir:      cacheDir,
+		CacheTTL:      time.Hour,
+	}
+
+	for i := 0; i < 2; i++ {
+		name, err := client.ASOverview(context.Background(), "as15169")
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if name != "GOOGLE - Google LLC" {
+			t.Fatalf("call %d: name = %q", i, name)
+		}
+	}
+	if gotResource != "AS15169" {
+		t.Errorf("resource = %q, want AS15169", gotResource)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("server hits = %d, want 1 (cached)", got)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "as-overview", "AS15169.json")); err != nil {
+		t.Errorf("cache file missing: %v", err)
 	}
 }
 
@@ -226,8 +291,8 @@ func TestCachedPrefixASNs(t *testing.T) {
 		t.Fatalf("got %d entries %v, want 1", len(got), got)
 	}
 	want := netip.MustParsePrefix("193.0.18.0/23")
-	if asn, ok := got[want]; !ok || asn != "AS3333" {
-		t.Errorf("entry %v = %q, %v; want %q", want, asn, ok, "AS3333")
+	if asn, ok := got[want]; !ok || asn != 3333 {
+		t.Errorf("entry %v = %d, %v; want 3333", want, asn, ok)
 	}
 }
 
