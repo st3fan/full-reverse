@@ -179,7 +179,7 @@ func TestPrefixOverview(t *testing.T) {
 	var gotResource string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotResource = r.URL.Query().Get("resource")
-		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"resource":"8.8.8.0/24","announced":true,"asns":[{"asn":15169,"holder":"Google LLC"}]}}`)
+		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"resource":"8.8.8.0/24","announced":true,"asns":[{"asn":15169,"holder":"GOOGLE - Google LLC"}]}}`)
 	}))
 	defer server.Close()
 
@@ -202,8 +202,11 @@ func TestPrefixOverview(t *testing.T) {
 	if ov.ASN != 15169 {
 		t.Errorf("asn = %d, want 15169", ov.ASN)
 	}
-	if ov.ASName != "Google LLC" {
-		t.Errorf("as name = %q, want %q", ov.ASName, "Google LLC")
+	if ov.ASName != "GOOGLE" {
+		t.Errorf("as name = %q, want %q", ov.ASName, "GOOGLE")
+	}
+	if ov.ASOrg != "Google LLC" {
+		t.Errorf("as org = %q, want %q", ov.ASOrg, "Google LLC")
 	}
 	if !ov.Announced {
 		t.Error("announced = false, want true")
@@ -253,12 +256,12 @@ func TestASOverview(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		name, err := client.ASOverview(context.Background(), "as15169")
+		info, err := client.ASOverview(context.Background(), "as15169")
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
-		if name != "GOOGLE - Google LLC" {
-			t.Fatalf("call %d: name = %q", i, name)
+		if info.Name != "GOOGLE" || info.Org != "Google LLC" {
+			t.Fatalf("call %d: info = %+v, want GOOGLE / Google LLC", i, info)
 		}
 	}
 	if gotResource != "AS15169" {
@@ -298,7 +301,7 @@ func TestSearchASNs(t *testing.T) {
 		if len(matches) != 2 {
 			t.Fatalf("call %d: got %d matches %v", i, len(matches), matches)
 		}
-		if matches[0].ASN != 14618 || matches[0].Name != "AMAZON-AES" || matches[0].Description != "AMAZON-AES - Amazon.com, Inc." {
+		if matches[0].ASN != 14618 || matches[0].Name != "AMAZON-AES" || matches[0].Org != "Amazon.com, Inc." || matches[0].Description != "AMAZON-AES - Amazon.com, Inc." {
 			t.Errorf("call %d: match[0] = %+v", i, matches[0])
 		}
 	}

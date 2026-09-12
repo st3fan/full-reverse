@@ -189,14 +189,34 @@ func parseAnnouncedPrefixes(body []byte) ([]netip.Prefix, error) {
 	return prefixes, nil
 }
 
+// ASInfo holds an AS name and organization, split from a RIPE Stat "holder"
+// value of the form "<as-name> - <organization>".
+type ASInfo struct {
+	Name string
+	Org  string
+}
+
+// splitHolder splits a RIPE Stat holder string on the first " - ".
+func splitHolder(holder string) ASInfo {
+	if i := strings.Index(holder, " - "); i >= 0 {
+		return ASInfo{
+			Name: strings.TrimSpace(holder[:i]),
+			Org:  strings.TrimSpace(holder[i+3:]),
+		}
+	}
+	return ASInfo{Name: strings.TrimSpace(holder)}
+}
+
 // PrefixOverview describes the RIPE Stat prefix-overview for an IP or prefix.
 type PrefixOverview struct {
 	// Prefix is the covering prefix reported by RIPE Stat, if any.
 	Prefix netip.Prefix
 	// ASN is the first announcing AS number, or 0 when unknown.
 	ASN uint32
-	// ASName is the holder of the first announcing AS, or empty.
+	// ASName is the as-name of the first announcing AS, or empty.
 	ASName string
+	// ASOrg is the organization of the first announcing AS, or empty.
+	ASOrg string
 	// Announced reports whether the prefix is currently announced.
 	Announced bool
 }
@@ -283,7 +303,9 @@ func parsePrefixOverview(body []byte) (*PrefixOverview, error) {
 	}
 	if len(payload.Data.ASNs) > 0 {
 		overview.ASN = payload.Data.ASNs[0].ASN
-		overview.ASName = payload.Data.ASNs[0].Holder
+		info := splitHolder(payload.Data.ASNs[0].Holder)
+		overview.ASName = info.Name
+		overview.ASOrg = info.Org
 	}
 	return overview, nil
 }
@@ -296,19 +318,19 @@ type asOverviewResponse struct {
 	} `json:"data"`
 }
 
-// ASOverview returns the holder (name) of an ASN. It uses the as-overview data
-// API and reuses a cached response when caching is enabled.
-func (c *Client) ASOverview(ctx context.Context, asn string) (string, error) {
+// ASOverview returns the as-name and organization of an ASN. It uses the
+// as-overview data API and reuses a cached response when caching is enabled.
+func (c *Client) ASOverview(ctx context.Context, asn string) (ASInfo, error) {
 	resource, err := NormalizeASN(asn)
 	if err != nil {
-		return "", err
+		return ASInfo{}, err
 	}
 
 	cacheKey := asOverviewCacheKey(resource)
 	if body, ok := c.readCache(cacheKey); ok {
-		if name, err := parseASOverview(body); err == nil {
+		if info, err := parseASOverview(body); err == nil {
 			c.logf("using cached AS overview for %s", resource)
-			return name, nil
+			return info, nil
 		}
 	}
 
@@ -320,7 +342,7 @@ func (c *Client) ASOverview(ctx context.Context, asn string) (string, error) {
 	endpoint := base + "?resource=" + url.QueryEscape(resource)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("ripestat: building request: %w", err)
+		return ASInfo{}, fmt.Errorf("ripestat: building request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
@@ -332,37 +354,38 @@ func (c *Client) ASOverview(ctx context.Context, asn string) (string, error) {
 	c.logf("Fetching %s", endpoint)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ripestat: %w", err)
+		return ASInfo{}, fmt.Errorf("ripestat: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ripestat: unexpected HTTP status %s", resp.Status)
+		return ASInfo{}, fmt.Errorf("ripestat: unexpected HTTP status %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("ripestat: reading response: %w", err)
+		return ASInfo{}, fmt.Errorf("ripestat: reading response: %w", err)
 	}
 
-	name, err := parseASOverview(body)
+	info, err := parseASOverview(body)
 	if err != nil {
-		return "", err
+		return ASInfo{}, err
 	}
 	c.writeCache(cacheKey, body)
-	return name, nil
+	return info, nil
 }
 
-// parseASOverview validates an as-overview response body and returns the holder.
-func parseASOverview(body []byte) (string, error) {
+// parseASOverview validates an as-overview response body and returns the split
+// as-name and organization.
+func parseASOverview(body []byte) (ASInfo, error) {
 	var payload asOverviewResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("ripestat: decoding response: %w", err)
+		return ASInfo{}, fmt.Errorf("ripestat: decoding response: %w", err)
 	}
 	if payload.Status != "ok" {
-		return "", fmt.Errorf("ripestat: API status %q (HTTP %d)", payload.Status, payload.StatusCode)
+		return ASInfo{}, fmt.Errorf("ripestat: API status %q (HTTP %d)", payload.Status, payload.StatusCode)
 	}
-	return payload.Data.Holder, nil
+	return splitHolder(payload.Data.Holder), nil
 }
 
 // asOverviewCacheKey returns the cache key for an as-overview resource.
@@ -376,6 +399,8 @@ type ASMatch struct {
 	ASN uint32
 	// Name is the as-name portion of the description (the part before " - ").
 	Name string
+	// Org is the organization portion of the description, if present.
+	Org string
 	// Description is the full description, e.g. "AMAZON-AES - Amazon.com, Inc.".
 	Description string
 }
@@ -477,13 +502,11 @@ func parseSearchASNs(body []byte) ([]ASMatch, error) {
 			}
 			seen[n] = struct{}{}
 
-			name := s.Description
-			if i := strings.Index(name, " - "); i >= 0 {
-				name = name[:i]
-			}
+			name := splitHolder(s.Description)
 			matches = append(matches, ASMatch{
 				ASN:         n,
-				Name:        strings.TrimSpace(name),
+				Name:        name.Name,
+				Org:         name.Org,
 				Description: s.Description,
 			})
 		}

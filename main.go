@@ -32,6 +32,7 @@ type Result struct {
 	Prefix string   `json:"prefix"`
 	ASN    *uint32  `json:"asn"`
 	ASName *string  `json:"as_name"`
+	ASOrg  *string  `json:"as_org"`
 	PTR    []string `json:"ptr"`
 	Error  string   `json:"error,omitempty"`
 }
@@ -40,7 +41,8 @@ type Result struct {
 type target struct {
 	prefix netip.Prefix
 	asn    uint32 // announcing AS number, 0 for explicitly provided CIDRs
-	asName string // announcing AS holder, empty when unknown
+	asName string // announcing AS name, empty when unknown
+	asOrg  string // announcing AS organization, empty when unknown
 }
 
 // dnsResolver wraps one or more upstream servers with a display name and
@@ -175,20 +177,20 @@ func (x *asnIndex) lookup(addr netip.Addr) (uint32, bool) {
 	return 0, false
 }
 
-// asnResolver determines the announcing AS (number and name) for an IP. It
-// consults prefixes already known from the cache or AS targets before calling
-// RIPE Stat, and records learned prefixes so later lookups are free.
+// asnResolver determines the announcing AS (number, name, and organization) for
+// an IP. It consults prefixes already known from the cache or AS targets before
+// calling RIPE Stat, and records learned prefixes so later lookups are free.
 type asnResolver struct {
 	client *ripestat.Client
 	index  *asnIndex
 	mu     sync.Mutex // serializes API lookups and avoids duplicate work
-	names  map[uint32]string
+	names  map[uint32]ripestat.ASInfo
 }
 
-// resolve returns the AS number and holder for ip, or 0/"" when unknown. All
+// resolve returns the AS number and info for ip, or 0/zero when unknown. All
 // lookups are serialized, which also avoids duplicate API calls for the same
 // prefix.
-func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, string) {
+func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, ripestat.ASInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -197,45 +199,46 @@ func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, strin
 		overview, err := r.client.PrefixOverview(ctx, ip.String())
 		if err != nil {
 			logf("warning: AS lookup for %s failed: %v", ip, err)
-			return 0, ""
+			return 0, ripestat.ASInfo{}
 		}
 		asn = overview.ASN
 		if overview.Prefix.IsValid() {
 			r.index.add(overview.Prefix, overview.ASN)
 		}
-		if asn != 0 && overview.ASName != "" {
-			r.rememberLocked(asn, overview.ASName)
-			return asn, overview.ASName
+		if asn != 0 && (overview.ASName != "" || overview.ASOrg != "") {
+			info := ripestat.ASInfo{Name: overview.ASName, Org: overview.ASOrg}
+			r.rememberLocked(asn, info)
+			return asn, info
 		}
 	}
 	if asn == 0 {
-		return 0, ""
+		return 0, ripestat.ASInfo{}
 	}
 	return asn, r.nameLocked(ctx, asn)
 }
 
-// nameLocked returns the holder of asn, consulting the in-memory map and then
+// nameLocked returns the AS info for asn, consulting the in-memory map and then
 // the as-overview API (which is itself cached on disk). The caller must hold
 // r.mu.
-func (r *asnResolver) nameLocked(ctx context.Context, asn uint32) string {
-	if name, ok := r.names[asn]; ok {
-		return name
+func (r *asnResolver) nameLocked(ctx context.Context, asn uint32) ripestat.ASInfo {
+	if info, ok := r.names[asn]; ok {
+		return info
 	}
-	name, err := r.client.ASOverview(ctx, fmt.Sprintf("AS%d", asn))
+	info, err := r.client.ASOverview(ctx, fmt.Sprintf("AS%d", asn))
 	if err != nil {
 		logf("warning: AS overview lookup for AS%d failed: %v", asn, err)
-		return ""
+		return ripestat.ASInfo{}
 	}
-	r.rememberLocked(asn, name)
-	return name
+	r.rememberLocked(asn, info)
+	return info
 }
 
-// rememberLocked records an AS name. The caller must hold r.mu.
-func (r *asnResolver) rememberLocked(asn uint32, name string) {
+// rememberLocked records AS info. The caller must hold r.mu.
+func (r *asnResolver) rememberLocked(asn uint32, info ripestat.ASInfo) {
 	if r.names == nil {
-		r.names = make(map[uint32]string)
+		r.names = make(map[uint32]ripestat.ASInfo)
 	}
-	r.names[asn] = name
+	r.names[asn] = info
 }
 
 // stringList is a repeatable string flag.
@@ -355,14 +358,23 @@ func main() {
 						name := t.asName
 						res.ASName = &name
 					}
+					if t.asOrg != "" {
+						org := t.asOrg
+						res.ASOrg = &org
+					}
 				} else if asnRes != nil {
 					// A lookup that yields nothing leaves the fields nil, i.e. null.
-					asn, name := asnRes.resolve(ctx, ip)
+					asn, info := asnRes.resolve(ctx, ip)
 					if asn != 0 {
 						res.ASN = &asn
 					}
-					if name != "" {
+					if info.Name != "" {
+						name := info.Name
 						res.ASName = &name
+					}
+					if info.Org != "" {
+						org := info.Org
+						res.ASOrg = &org
 					}
 				}
 
@@ -690,7 +702,7 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			if err != nil {
 				return nil, err
 			}
-			name, err := client.ASOverview(ctx, resource)
+			info, err := client.ASOverview(ctx, resource)
 			if err != nil {
 				return nil, err
 			}
@@ -704,7 +716,7 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			}
 			logf("%s: %d announced IPv4 prefix(es): %s", resource, len(announced), strings.Join(list, ", "))
 			for _, p := range announced {
-				targets = append(targets, target{prefix: p, asn: number, asName: name})
+				targets = append(targets, target{prefix: p, asn: number, asName: info.Name, asOrg: info.Org})
 			}
 		}
 	}

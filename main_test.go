@@ -62,21 +62,25 @@ func TestResultASNMarshaling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(unknown), `"asn":null`) || !strings.Contains(string(unknown), `"as_name":null`) {
-		t.Errorf("unknown AS marshaled as %s, want null asn and as_name", unknown)
+	if !strings.Contains(string(unknown), `"asn":null`) || !strings.Contains(string(unknown), `"as_name":null`) || !strings.Contains(string(unknown), `"as_org":null`) {
+		t.Errorf("unknown AS marshaled as %s, want null asn, as_name and as_org", unknown)
 	}
 
 	asn := uint32(15169)
-	name := "GOOGLE - Google LLC"
-	known, err := json.Marshal(Result{IP: "8.8.8.8", Prefix: "8.8.8.8/32", ASN: &asn, ASName: &name, PTR: []string{"dns.google"}})
+	name := "GOOGLE"
+	org := "Google LLC"
+	known, err := json.Marshal(Result{IP: "8.8.8.8", Prefix: "8.8.8.8/32", ASN: &asn, ASName: &name, ASOrg: &org, PTR: []string{"dns.google"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(known), `"asn":15169`) {
 		t.Errorf("known ASN marshaled as %s, want \"asn\":15169", known)
 	}
-	if !strings.Contains(string(known), `"as_name":"GOOGLE - Google LLC"`) {
+	if !strings.Contains(string(known), `"as_name":"GOOGLE"`) {
 		t.Errorf("known AS name not found in %s", known)
+	}
+	if !strings.Contains(string(known), `"as_org":"Google LLC"`) {
+		t.Errorf("known AS org not found in %s", known)
 	}
 }
 
