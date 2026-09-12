@@ -1,12 +1,35 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"testing"
 
 	"github.com/miekg/dns"
 )
+
+func TestResolveTargets(t *testing.T) {
+	targets, err := resolveTargets(context.Background(), []string{"1.1.1.1", "10.0.0.7/24"})
+	if err != nil {
+		t.Fatalf("resolveTargets: %v", err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("1.1.1.1/32"),
+		netip.MustParsePrefix("10.0.0.0/24"),
+	}
+	if len(targets) != len(want) {
+		t.Fatalf("got %d targets, want %d", len(targets), len(want))
+	}
+	for i := range want {
+		if targets[i].prefix != want[i] {
+			t.Errorf("target[%d] prefix = %v, want %v", i, targets[i].prefix, want[i])
+		}
+		if targets[i].asn != "" {
+			t.Errorf("target[%d] asn = %q, want empty", i, targets[i].asn)
+		}
+	}
+}
 
 func TestPTRNames(t *testing.T) {
 	resp := new(dns.Msg)

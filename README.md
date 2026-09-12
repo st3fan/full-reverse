@@ -14,32 +14,32 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-i FILE]... [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|ASN|FILE...]
+full-reverse [-i FILE]... [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|IP|ASN|FILE...]
 ```
 
-Targets may be passed as arguments, read from files, or piped on stdin. Use
-`-i FILE` (or `-input FILE`) to read a list with one prefix or ASN per line;
-`-i -` reads that list from stdin. The flag may be repeated. A positional
-argument that names a readable file is also read as a list of targets;
-otherwise it is treated as a literal CIDR or ASN (a positional `-` reads
-stdin). In files and stdin, blank lines, `#` comments, and comma/whitespace
-separated values are accepted.
+Targets may be passed as arguments, read from files, or piped on stdin. A
+plain IP such as `1.1.1.1` is treated as a `/32` prefix. Use `-i FILE` (or
+`-input FILE`) to read a list with one target per line; `-i -` reads that list
+from stdin. The flag may be repeated. A positional argument that names a
+readable file is also read as a list of targets; otherwise it is treated as a
+literal CIDR, IP, or ASN (a positional `-` reads stdin). In files and stdin,
+blank lines, `#` comments, and comma/whitespace separated values are accepted.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
-| `-i`, `-input` | – | read prefixes/ASNs from a file, one per line; use `-` for stdin; may be repeated |
+| `-i`, `-input` | – | read targets from a file, one per line; use `-` for stdin; may be repeated |
 | `-d` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
 | `-c` | `32` | number of concurrent reverse lookups |
 | `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
 | `-t` | `2.5s` | timeout per attempt |
 | `-forward-confirmed-only` | `false` | only report PTR records that forward-confirm (see below) |
 
-Only IPv4 CIDRs are supported. Targets iterate over the whole prefix,
-including the network and broadcast addresses. CIDRs and ASNs may be mixed
-freely:
+Only IPv4 is supported; plain IPs are treated as `/32`. Targets iterate over
+the whole prefix, including the network and broadcast addresses. CIDRs, IPs,
+and ASNs may be mixed freely:
 
 ```sh
-full-reverse 1.1.1.0/24 AS15348
+full-reverse 1.1.1.0/24 8.8.8.8 AS15348
 ```
 
 An ASN is expanded to its currently announced prefixes from the

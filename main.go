@@ -156,8 +156,8 @@ func main() {
 	)
 
 	flag.Var(&dnsServers, "d", "DNS server to use (e.g. 8.8.8.8:53); repeatable, defaults to system resolver")
-	flag.Var(&inputFiles, "i", "read prefixes/ASNs from a file, one per line; use - for stdin")
-	flag.Var(&inputFiles, "input", "read prefixes/ASNs from a file, one per line; use - for stdin")
+	flag.Var(&inputFiles, "i", "read targets from a file, one per line; use - for stdin")
+	flag.Var(&inputFiles, "input", "read targets from a file, one per line; use - for stdin")
 	flag.BoolVar(&forwardConfirmedOnly, "forward-confirmed-only", false, "only report PTR records whose name resolves back to the same IP")
 	flag.IntVar(&concurrency, "c", 32, "number of concurrent reverse lookups")
 	flag.IntVar(&retries, "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
@@ -370,10 +370,11 @@ func logf(format string, args ...any) {
 
 // readInputs collects targets from explicit input files, positional arguments,
 // and (when nothing else is given) stdin. Values in input files and stdin are
-// one CIDR or ASN per line, though whitespace/comma separated values and '#'
-// comments are also accepted. A positional argument that names an existing
-// file is read as a list of targets; any other positional argument is treated
-// as a literal CIDR or ASN. An input file of "-" reads stdin.
+// one target (CIDR, plain IP, or ASN) per line, though whitespace/comma
+// separated values and '#' comments are also accepted. A positional argument
+// that names an existing file is read as a list of targets; any other
+// positional argument is treated as a literal CIDR, IP, or ASN. An input file
+// of "-" reads stdin.
 func readInputs(args, inputFiles []string) ([]string, error) {
 	var inputs []string
 
@@ -408,7 +409,7 @@ func readInputs(args, inputFiles []string) ([]string, error) {
 		}
 		f, err := os.Open(arg)
 		if err != nil {
-			// Not a readable file: treat the argument as a literal CIDR or ASN.
+			// Not a readable file: treat the argument as a literal CIDR, IP, or ASN.
 			inputs = append(inputs, arg)
 			continue
 		}
@@ -429,7 +430,7 @@ func readInputs(args, inputFiles []string) ([]string, error) {
 	}
 
 	if len(inputs) == 0 {
-		return nil, fmt.Errorf("no CIDRs or ASNs provided")
+		return nil, fmt.Errorf("no CIDRs, IPs, or ASNs provided")
 	}
 	return inputs, nil
 }
@@ -452,10 +453,10 @@ func scanCIDRs(r io.Reader, inputs []string) ([]string, error) {
 	return inputs, nil
 }
 
-// resolveTargets converts a mixed list of CIDRs and ASNs into scan targets.
-// ASNs ("AS15169", "as15169", or bare "15169") are expanded to their announced
-// prefixes via the RIPE Stat API, and each such target records the ASN it came
-// from.
+// resolveTargets converts a mixed list of CIDRs, plain IPs, and ASNs into scan
+// targets. A plain IP is treated as a /32. ASNs ("AS15169", "as15169", or bare
+// "15169") are expanded to their announced prefixes via the RIPE Stat API, and
+// each such target records the ASN it came from.
 func resolveTargets(ctx context.Context, inputs []string) ([]target, error) {
 	var targets []target
 	var asns []string
@@ -468,11 +469,19 @@ func resolveTargets(ctx context.Context, inputs []string) ([]target, error) {
 			targets = append(targets, target{prefix: p.Masked()})
 			continue
 		}
+		if a, err := netip.ParseAddr(in); err == nil {
+			a = a.Unmap()
+			if !a.Is4() {
+				return nil, fmt.Errorf("only IPv4 addresses are supported: %q", in)
+			}
+			targets = append(targets, target{prefix: netip.PrefixFrom(a, 32)})
+			continue
+		}
 		if _, err := ripestat.NormalizeASN(in); err == nil {
 			asns = append(asns, in)
 			continue
 		}
-		return nil, fmt.Errorf("invalid CIDR or ASN %q", in)
+		return nil, fmt.Errorf("invalid CIDR, IP, or ASN %q", in)
 	}
 
 	if len(asns) > 0 {
@@ -498,7 +507,7 @@ func resolveTargets(ctx context.Context, inputs []string) ([]target, error) {
 	}
 
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("no CIDRs or ASNs provided")
+		return nil, fmt.Errorf("no CIDRs, IPs, or ASNs provided")
 	}
 	return targets, nil
 }
