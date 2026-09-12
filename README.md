@@ -91,17 +91,24 @@ than a /24, an intermediate progress line is emitted for every 256 IPs scanned,
 and the run ends with counts of resolved, PTR-less, unconfirmed, and failed
 lookups. A final metrics line is then logged for each DNS resolver, reporting
 the number of requests it handled, resolver errors, and average response time.
-`ptr` is always an array (possibly empty). Addresses with no PTR record
-(NXDOMAIN / no such host) are skipped silently; `error` is only present for
-real lookup failures such as timeouts or SERVFAIL.
+`ptr` is always an array (possibly empty). Each record carries the `prefix` it
+came from, plus an `asn` field when the prefix was expanded from an ASN.
+Addresses with no PTR record (NXDOMAIN / no such host) are skipped silently;
+`error` is only present for real lookup failures such as timeouts or SERVFAIL.
 
 ```sh
 $ echo '1.1.1.0/30' | ./full-reverse -d 1.1.1.1 -d 8.8.8.8 -c 4
 2026-09-11T14:35:20-04:00 looking up 4 IPs across 1 CIDR(s)
-{"ip":"1.1.1.1","ptr":["one.one.one.one"]}
-{"ip":"1.1.1.2","ptr":["security.cloudflare-dns.com"]}
-{"ip":"1.1.1.3","ptr":["family.cloudflare-dns.com"]}
-2026-09-11T14:35:20-04:00 done: 4 IPs looked up, 3 resolved, 1 without PTR, 0 failed in 17ms
+{"ip":"1.1.1.1","prefix":"1.1.1.0/30","ptr":["one.one.one.one"]}
+{"ip":"1.1.1.2","prefix":"1.1.1.0/30","ptr":["security.cloudflare-dns.com"]}
+{"ip":"1.1.1.3","prefix":"1.1.1.0/30","ptr":["family.cloudflare-dns.com"]}
+2026-09-11T14:35:20-04:00 done: 4 IPs looked up, 3 resolved, 1 without PTR, 0 unconfirmed, 0 failed in 17ms
 2026-09-11T14:35:20-04:00 resolver 1.1.1.1:53: 2 request(s), 0 error(s), avg response 16.12ms
 2026-09-11T14:35:20-04:00 resolver 8.8.8.8:53: 2 request(s), 0 error(s), avg response 15.811ms
+```
+
+When scanning an AS, the `asn` field identifies the source, e.g.:
+
+```json
+{"ip":"193.0.19.4","prefix":"193.0.18.0/23","asn":"AS3333","ptr":["web.admindns.ripe.net"]}
 ```

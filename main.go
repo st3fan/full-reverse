@@ -28,9 +28,17 @@ var errNotFound = errors.New("no such host")
 
 // Result is one JSONL record emitted per IP address.
 type Result struct {
-	IP    string   `json:"ip"`
-	PTR   []string `json:"ptr"`
-	Error string   `json:"error,omitempty"`
+	IP     string   `json:"ip"`
+	Prefix string   `json:"prefix"`
+	ASN    string   `json:"asn,omitempty"`
+	PTR    []string `json:"ptr"`
+	Error  string   `json:"error,omitempty"`
+}
+
+// target is one prefix to scan together with where it came from.
+type target struct {
+	prefix netip.Prefix
+	asn    string // announcing ASN, empty for explicitly provided CIDRs
 }
 
 // dnsResolver wraps one or more upstream servers with a display name and
@@ -180,18 +188,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Expand the mixed list of CIDRs and ASNs into IPv4 prefixes.
-	prefixes, err := resolveTargets(ctx, inputs)
+	// Expand the mixed list of CIDRs and ASNs into scan targets.
+	targets, err := resolveTargets(ctx, inputs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
 	total := uint64(0)
-	for _, p := range prefixes {
-		total += uint64(1) << (32 - p.Bits())
+	for _, t := range targets {
+		total += uint64(1) << (32 - t.prefix.Bits())
 	}
-	logf("looking up %d IPs across %d CIDR(s)", total, len(prefixes))
+	logf("looking up %d IPs across %d CIDR(s)", total, len(targets))
 
 	start := time.Now()
 	var scanned, resolved, notFound, unconfirmed, failed atomic.Uint64
@@ -200,8 +208,8 @@ func main() {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	for _, p := range prefixes {
-		for addr := p.Masked().Addr(); p.Contains(addr); addr = addr.Next() {
+	for _, t := range targets {
+		for addr := t.prefix.Masked().Addr(); t.prefix.Contains(addr); addr = addr.Next() {
 			ip := addr
 			wg.Add(1)
 			sem <- struct{}{}
@@ -210,13 +218,16 @@ func main() {
 				defer func() { <-sem }()
 				defer reportProgress(&scanned, &resolved, total, start)
 
+				res := Result{IP: ip.String(), Prefix: t.prefix.String(), ASN: t.asn, PTR: []string{}}
+
 				idx := rr.Add(1) - 1
 				dr := resolvers[idx%uint64(len(resolvers))]
 
 				reverse, err := dns.ReverseAddr(ip.String())
 				if err != nil {
+					res.Error = err.Error()
 					failed.Add(1)
-					emit(Result{IP: ip.String(), PTR: []string{}, Error: err.Error()})
+					emit(res)
 					return
 				}
 
@@ -227,8 +238,9 @@ func main() {
 						notFound.Add(1)
 						return
 					}
+					res.Error = err.Error()
 					failed.Add(1)
-					emit(Result{IP: ip.String(), PTR: []string{}, Error: err.Error()})
+					emit(res)
 					return
 				}
 
@@ -254,8 +266,9 @@ func main() {
 					notFound.Add(1)
 					return
 				}
+				res.PTR = names
 				resolved.Add(1)
-				emit(Result{IP: ip.String(), PTR: names})
+				emit(res)
 			}()
 		}
 	}
@@ -439,11 +452,12 @@ func scanCIDRs(r io.Reader, inputs []string) ([]string, error) {
 	return inputs, nil
 }
 
-// resolveTargets converts a mixed list of CIDRs and ASNs into IPv4 prefixes.
+// resolveTargets converts a mixed list of CIDRs and ASNs into scan targets.
 // ASNs ("AS15169", "as15169", or bare "15169") are expanded to their announced
-// prefixes via the RIPE Stat API.
-func resolveTargets(ctx context.Context, inputs []string) ([]netip.Prefix, error) {
-	var prefixes []netip.Prefix
+// prefixes via the RIPE Stat API, and each such target records the ASN it came
+// from.
+func resolveTargets(ctx context.Context, inputs []string) ([]target, error) {
+	var targets []target
 	var asns []string
 
 	for _, in := range inputs {
@@ -451,7 +465,7 @@ func resolveTargets(ctx context.Context, inputs []string) ([]netip.Prefix, error
 			if !p.Addr().Is4() {
 				return nil, fmt.Errorf("only IPv4 CIDRs are supported: %q", in)
 			}
-			prefixes = append(prefixes, p)
+			targets = append(targets, target{prefix: p.Masked()})
 			continue
 		}
 		if _, err := ripestat.NormalizeASN(in); err == nil {
@@ -477,14 +491,16 @@ func resolveTargets(ctx context.Context, inputs []string) ([]netip.Prefix, error
 				list[i] = p.String()
 			}
 			logf("%s: %d announced IPv4 prefix(es): %s", resource, len(announced), strings.Join(list, ", "))
-			prefixes = append(prefixes, announced...)
+			for _, p := range announced {
+				targets = append(targets, target{prefix: p, asn: resource})
+			}
 		}
 	}
 
-	if len(prefixes) == 0 {
+	if len(targets) == 0 {
 		return nil, fmt.Errorf("no CIDRs or ASNs provided")
 	}
-	return prefixes, nil
+	return targets, nil
 }
 
 // buildResolvers builds one dnsResolver per -d value, or a single resolver
