@@ -30,7 +30,7 @@ var errNotFound = errors.New("no such host")
 type Result struct {
 	IP     string   `json:"ip"`
 	Prefix string   `json:"prefix"`
-	ASN    string   `json:"asn,omitempty"`
+	ASN    *string  `json:"asn"`
 	PTR    []string `json:"ptr"`
 	Error  string   `json:"error,omitempty"`
 }
@@ -135,6 +135,75 @@ func aRecords(resp *dns.Msg) []netip.Addr {
 	return addrs
 }
 
+// asnIndex maps known prefixes to their announcing ASN. It is safe for
+// concurrent use. Lookups walk from the most specific to the least specific
+// supernet, so a /0 entry matches every address.
+type asnIndex struct {
+	mu    sync.RWMutex
+	byNet map[netip.Prefix]string
+}
+
+func newASNIndex() *asnIndex {
+	return &asnIndex{byNet: make(map[netip.Prefix]string)}
+}
+
+func (x *asnIndex) add(p netip.Prefix, asn string) {
+	if asn == "" || !p.IsValid() {
+		return
+	}
+	p = p.Masked()
+	x.mu.Lock()
+	if _, ok := x.byNet[p]; !ok {
+		x.byNet[p] = asn
+	}
+	x.mu.Unlock()
+}
+
+// lookup returns the ASN of the most specific known prefix containing addr.
+func (x *asnIndex) lookup(addr netip.Addr) (string, bool) {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+	for bits := addr.BitLen(); bits >= 0; bits-- {
+		p := netip.PrefixFrom(addr, bits).Masked()
+		if asn, ok := x.byNet[p]; ok {
+			return asn, true
+		}
+	}
+	return "", false
+}
+
+// asnResolver determines the announcing ASN for an IP. It consults prefixes
+// already known from the cache or AS targets before calling RIPE Stat, and
+// records learned prefixes so later lookups are free.
+type asnResolver struct {
+	client *ripestat.Client
+	index  *asnIndex
+	mu     sync.Mutex // serializes API lookups and avoids duplicate work
+}
+
+func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) string {
+	if asn, ok := r.index.lookup(ip); ok {
+		return asn
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Another goroutine may have resolved this prefix while we waited.
+	if asn, ok := r.index.lookup(ip); ok {
+		return asn
+	}
+
+	overview, err := r.client.PrefixOverview(ctx, ip.String())
+	if err != nil {
+		logf("warning: AS lookup for %s failed: %v", ip, err)
+		return ""
+	}
+	if overview.Prefix.IsValid() {
+		r.index.add(overview.Prefix, overview.ASN)
+	}
+	return overview.ASN
+}
+
 // stringList is a repeatable string flag.
 type stringList []string
 
@@ -150,6 +219,7 @@ func main() {
 		dnsServers           stringList
 		inputFiles           stringList
 		forwardConfirmedOnly bool
+		lookupAS             bool
 		concurrency          int
 		retries              int
 		timeout              time.Duration
@@ -160,6 +230,8 @@ func main() {
 	flag.Var(&inputFiles, "input", "read targets from a file, one per line; use - for stdin")
 	flag.BoolVar(&quiet, "q", false, "silence progress and summary logging")
 	flag.BoolVar(&quiet, "quiet", false, "silence progress and summary logging")
+	flag.BoolVar(&lookupAS, "a", false, "look up the announcing ASN for IPs whose ASN is not already known")
+	flag.BoolVar(&lookupAS, "lookup-as", false, "look up the announcing ASN for IPs whose ASN is not already known")
 	flag.BoolVar(&forwardConfirmedOnly, "forward-confirmed-only", false, "only report PTR records whose name resolves back to the same IP")
 	flag.IntVar(&concurrency, "c", 32, "number of concurrent reverse lookups")
 	flag.IntVar(&retries, "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
@@ -190,11 +262,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Expand the mixed list of CIDRs and ASNs into scan targets.
-	targets, err := resolveTargets(ctx, inputs)
+	// Expand the mixed list of CIDRs, IPs, and ASNs into scan targets.
+	client := ripestat.New()
+	client.Logf = logf
+	targets, err := resolveTargets(ctx, client, inputs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// When requested, prepare IP -> ASN resolution. Cached announced-prefixes
+	// responses are loaded first so known prefixes never hit the API.
+	var asnRes *asnResolver
+	if lookupAS {
+		index := newASNIndex()
+		cached := client.CachedPrefixASNs()
+		for p, asn := range cached {
+			index.add(p, asn)
+		}
+		for _, t := range targets {
+			if t.asn != "" {
+				index.add(t.prefix, t.asn)
+			}
+		}
+		asnRes = &asnResolver{client: client, index: index}
+		logf("loaded %d cached prefix(es) for AS resolution", len(cached))
 	}
 
 	total := uint64(0)
@@ -220,7 +312,17 @@ func main() {
 				defer func() { <-sem }()
 				defer reportProgress(&scanned, &resolved, total, start)
 
-				res := Result{IP: ip.String(), Prefix: t.prefix.String(), ASN: t.asn, PTR: []string{}}
+				res := Result{IP: ip.String(), Prefix: t.prefix.String(), PTR: []string{}}
+
+				if t.asn != "" {
+					asn := t.asn
+					res.ASN = &asn
+				} else if asnRes != nil {
+					// A lookup that yields nothing leaves ASN nil, i.e. JSON null.
+					if asn := asnRes.resolve(ctx, ip); asn != "" {
+						res.ASN = &asn
+					}
+				}
 
 				idx := rr.Add(1) - 1
 				dr := resolvers[idx%uint64(len(resolvers))]
@@ -466,7 +568,7 @@ func scanCIDRs(r io.Reader, inputs []string) ([]string, error) {
 // targets. A plain IP is treated as a /32. ASNs ("AS15169", "as15169", or bare
 // "15169") are expanded to their announced prefixes via the RIPE Stat API, and
 // each such target records the ASN it came from.
-func resolveTargets(ctx context.Context, inputs []string) ([]target, error) {
+func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []string) ([]target, error) {
 	var targets []target
 	var asns []string
 
@@ -494,7 +596,6 @@ func resolveTargets(ctx context.Context, inputs []string) ([]target, error) {
 	}
 
 	if len(asns) > 0 {
-		client := ripestat.New()
 		for _, asn := range asns {
 			resource, err := ripestat.NormalizeASN(asn)
 			if err != nil {

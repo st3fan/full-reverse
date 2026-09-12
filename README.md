@@ -14,7 +14,7 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-i FILE]... [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [-q] [CIDR|IP|ASN|FILE...]
+full-reverse [-i FILE]... [-a] [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [-q] [CIDR|IP|ASN|FILE...]
 ```
 
 Targets may be passed as arguments, read from files, or piped on stdin. A
@@ -28,6 +28,7 @@ blank lines, `#` comments, and comma/whitespace separated values are accepted.
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `-i`, `-input` | – | read targets from a file, one per line; use `-` for stdin; may be repeated |
+| `-a`, `-lookup-as` | `false` | look up the announcing ASN for IPs whose ASN is not already known |
 | `-d` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
 | `-c` | `32` | number of concurrent reverse lookups |
 | `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
@@ -49,14 +50,47 @@ IPv6 prefixes are ignored and duplicates are removed; the fetched prefixes are
 scanned in addition to any explicit CIDRs. ASNs accept `AS15169`, `as15169`, or
 `15169`.
 
-### ASN response cache
+### Looking up an IP's ASN
+
+By default, the `asn` field is `null`, or the announcing ASN when the IP's
+prefix was expanded from an ASN. With `-a`/`-lookup-as`, an IP whose ASN is not
+already known is resolved via the
+[RIPE Stat prefix-overview API](https://stat.ripe.net/docs/data-api/api-endpoints/prefix-overview)
+and the result is added to the `asn` field. If RIPE Stat returns no ASN (for
+example an unannounced address), the field stays `null`:
+
+```sh
+$ full-reverse -a 8.8.8.8
+{"ip":"8.8.8.8","prefix":"8.8.8.8/32","asn":"AS15169","ptr":["dns.google"]}
+
+$ full-reverse -a 192.0.2.1
+{"ip":"192.0.2.1","prefix":"192.0.2.1/32","asn":null,"ptr":["bogon.example.test"]}
+```
+
+Before calling the API, the tool loads every cached announced-prefixes
+response and indexes the prefixes they contain, so an IP covered by a cached
+AS prefix resolves without a network call. Prefixes learned from `AS` targets
+and from earlier lookups in the same run are indexed too, and API lookups are
+serialized so each covering prefix is queried at most once. Cache hits and
+outgoing API requests are logged to stderr, e.g.:
+
+```
+RIPE Stat: using cached announced-prefixes for AS3333
+Fetching https://stat.ripe.net/data/prefix-overview/data.json?resource=9.9.9.9
+```
+
+### RIPE Stat response cache
 
 RIPE Stat responses are cached for one hour (hardcoded) under
 `$XDG_CACHE_HOME/full-reverse/ripestat`, or `~/.cache/full-reverse/ripestat`
-when `XDG_CACHE_HOME` is unset. Each ASN is stored as `AS<number>.json` and
-reused while it is younger than the TTL; expired entries are refetched and
-overwritten. Caching is best-effort: unreadable or corrupt cache files are
-ignored and never fail a run.
+when `XDG_CACHE_HOME` is unset, and reused while younger than the TTL; expired
+entries are refetched and overwritten. Two kinds of responses are stored:
+
+- announced-prefixes results as `AS<number>.json`
+- prefix-overview results as `overview/<resource>.json`
+
+Caching is best-effort: unreadable or corrupt cache files are ignored and
+never fail a run.
 
 Queries bypass the libc/NSS path and are sent directly to DNS servers. When no
 `-d` is given, nameservers are read from `/etc/resolv.conf` and tried in order.
@@ -94,16 +128,16 @@ and the run ends with counts of resolved, PTR-less, unconfirmed, and failed
 lookups. A final metrics line is then logged for each DNS resolver, reporting
 the number of requests it handled, resolver errors, and average response time.
 `ptr` is always an array (possibly empty). Each record carries the `prefix` it
-came from, plus an `asn` field when the prefix was expanded from an ASN.
+came from and an `asn` field (`null` when unknown).
 Addresses with no PTR record (NXDOMAIN / no such host) are skipped silently;
 `error` is only present for real lookup failures such as timeouts or SERVFAIL.
 
 ```sh
 $ echo '1.1.1.0/30' | ./full-reverse -d 1.1.1.1 -d 8.8.8.8 -c 4
 2026-09-11T14:35:20-04:00 looking up 4 IPs across 1 CIDR(s)
-{"ip":"1.1.1.1","prefix":"1.1.1.0/30","ptr":["one.one.one.one"]}
-{"ip":"1.1.1.2","prefix":"1.1.1.0/30","ptr":["security.cloudflare-dns.com"]}
-{"ip":"1.1.1.3","prefix":"1.1.1.0/30","ptr":["family.cloudflare-dns.com"]}
+{"ip":"1.1.1.1","prefix":"1.1.1.0/30","asn":null,"ptr":["one.one.one.one"]}
+{"ip":"1.1.1.2","prefix":"1.1.1.0/30","asn":null,"ptr":["security.cloudflare-dns.com"]}
+{"ip":"1.1.1.3","prefix":"1.1.1.0/30","asn":null,"ptr":["family.cloudflare-dns.com"]}
 2026-09-11T14:35:20-04:00 done: 4 IPs looked up, 3 resolved, 1 without PTR, 0 unconfirmed, 0 failed in 17ms
 2026-09-11T14:35:20-04:00 resolver 1.1.1.1:53: 2 request(s), 0 error(s), avg response 16.12ms
 2026-09-11T14:35:20-04:00 resolver 8.8.8.8:53: 2 request(s), 0 error(s), avg response 15.811ms

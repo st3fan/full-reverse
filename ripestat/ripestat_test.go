@@ -107,6 +107,130 @@ func TestAnnouncedPrefixesErrorStatus(t *testing.T) {
 	}
 }
 
+func TestPrefixOverviewCache(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"resource":"8.8.8.0/24","announced":true,"asns":[{"asn":15169}]}}`)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	client := &Client{
+		HTTPClient:        server.Client(),
+		PrefixOverviewURL: server.URL,
+		CacheDir:          cacheDir,
+		CacheTTL:          time.Hour,
+	}
+
+	for i := 0; i < 3; i++ {
+		ov, err := client.PrefixOverview(context.Background(), "8.8.8.8")
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if ov.ASN != "AS15169" {
+			t.Fatalf("call %d: asn = %q, want AS15169", i, ov.ASN)
+		}
+	}
+
+	if got := hits.Load(); got != 1 {
+		t.Errorf("server hits = %d, want 1 (cached)", got)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "overview", "8.8.8.8.json")); err != nil {
+		t.Errorf("cache file missing: %v", err)
+	}
+}
+
+func TestPrefixOverviewCacheExpired(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"resource":"8.8.8.0/24","announced":true,"asns":[{"asn":15169}]}}`)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	client := &Client{
+		HTTPClient:        server.Client(),
+		PrefixOverviewURL: server.URL,
+		CacheDir:          cacheDir,
+		CacheTTL:          time.Hour,
+	}
+
+	if _, err := client.PrefixOverview(context.Background(), "8.8.8.8"); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	path := filepath.Join(cacheDir, "overview", "8.8.8.8.json")
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("aging cache file: %v", err)
+	}
+
+	if _, err := client.PrefixOverview(context.Background(), "8.8.8.8"); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("server hits = %d, want 2 (expired cache)", got)
+	}
+}
+
+func TestPrefixOverview(t *testing.T) {
+	var gotResource string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotResource = r.URL.Query().Get("resource")
+		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"resource":"8.8.8.0/24","announced":true,"asns":[{"asn":15169,"holder":"Google LLC"}]}}`)
+	}))
+	defer server.Close()
+
+	client := &Client{HTTPClient: server.Client(), PrefixOverviewURL: server.URL}
+	var logged []string
+	client.Logf = func(format string, args ...any) { logged = append(logged, format) }
+	ov, err := client.PrefixOverview(context.Background(), "8.8.8.8")
+	if err != nil {
+		t.Fatalf("PrefixOverview: %v", err)
+	}
+	if len(logged) == 0 || logged[0] != "Fetching %s" {
+		t.Errorf("Logf calls = %v, want a fetch URL message", logged)
+	}
+	if gotResource != "8.8.8.8" {
+		t.Errorf("resource = %q, want %q", gotResource, "8.8.8.8")
+	}
+	if want := netip.MustParsePrefix("8.8.8.0/24"); ov.Prefix != want {
+		t.Errorf("prefix = %v, want %v", ov.Prefix, want)
+	}
+	if ov.ASN != "AS15169" {
+		t.Errorf("asn = %q, want %q", ov.ASN, "AS15169")
+	}
+	if !ov.Announced {
+		t.Error("announced = false, want true")
+	}
+}
+
+func TestCachedPrefixASNs(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"status":"ok","status_code":200,"data":{"prefixes":[{"prefix":"193.0.18.0/23"},{"prefix":"2001:db8::/32"}]}}`
+	if err := os.WriteFile(filepath.Join(dir, "AS3333.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An unparseable cache file and an unrelated file must be skipped.
+	if err := os.WriteFile(filepath.Join(dir, "AS15169.json"), []byte(`{"status":"error"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := (&Client{CacheDir: dir}).CachedPrefixASNs()
+	if len(got) != 1 {
+		t.Fatalf("got %d entries %v, want 1", len(got), got)
+	}
+	want := netip.MustParsePrefix("193.0.18.0/23")
+	if asn, ok := got[want]; !ok || asn != "AS3333" {
+		t.Errorf("entry %v = %q, %v; want %q", want, asn, ok, "AS3333")
+	}
+}
+
 func TestAnnouncedPrefixesCache(t *testing.T) {
 	const body = `{"status":"ok","status_code":200,"data":{"prefixes":[{"prefix":"8.8.8.0/24"}]}}`
 
