@@ -523,7 +523,7 @@ func logf(format string, args ...any) {
 
 // readInputs collects targets from explicit input files, positional arguments,
 // and (when nothing else is given) stdin. Values in input files and stdin are
-// one target (CIDR, plain IP, or ASN) per line, though whitespace/comma
+// one target (CIDR, plain IP, ASN, or AS name) per line, though whitespace/comma
 // separated values and '#' comments are also accepted. A positional argument
 // that names an existing file is read as a list of targets; any other
 // positional argument is treated as a literal CIDR, IP, or ASN. An input file
@@ -606,10 +606,39 @@ func scanCIDRs(r io.Reader, inputs []string) ([]string, error) {
 	return inputs, nil
 }
 
-// resolveTargets converts a mixed list of CIDRs, plain IPs, and ASNs into scan
-// targets. A plain IP is treated as a /32. ASNs ("AS15169", "as15169", or bare
-// "15169") are expanded to their announced prefixes via the RIPE Stat API, and
-// each such target records the ASN it came from.
+// pickASN chooses a single ASN from RIPE Stat search matches, preferring an
+// exact as-name match and rejecting ambiguous names.
+func pickASN(name string, matches []ripestat.ASMatch) (ripestat.ASMatch, error) {
+	var exact []ripestat.ASMatch
+	for _, m := range matches {
+		if strings.EqualFold(m.Name, name) {
+			exact = append(exact, m)
+		}
+	}
+
+	switch {
+	case len(exact) == 1:
+		return exact[0], nil
+	case len(matches) == 1:
+		return matches[0], nil
+	default:
+		if len(exact) > 1 {
+			matches = exact
+		}
+		labels := make([]string, len(matches))
+		for i, m := range matches {
+			labels[i] = fmt.Sprintf("AS%d (%s)", m.ASN, m.Name)
+		}
+		return ripestat.ASMatch{}, fmt.Errorf("ambiguous AS name %q matches %s; use an AS number", name, strings.Join(labels, ", "))
+	}
+}
+
+// resolveTargets converts a mixed list of CIDRs, plain IPs, ASNs, and AS names
+// into scan targets. A plain IP is treated as a /32. ASNs ("AS15169",
+// "as15169", or bare "15169") are expanded to their announced prefixes via the
+// RIPE Stat API, and each such target records the ASN it came from. An AS name
+// such as "AMAZON-AES" is resolved to an ASN first, and is rejected when it
+// matches more than one AS.
 func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []string) ([]target, error) {
 	var targets []target
 	var asns []string
@@ -634,7 +663,21 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			asns = append(asns, in)
 			continue
 		}
-		return nil, fmt.Errorf("invalid CIDR, IP, or ASN %q", in)
+
+		// Otherwise treat the token as an AS name (e.g. AMAZON-AES).
+		matches, err := client.SearchASNs(ctx, in)
+		if err != nil {
+			return nil, fmt.Errorf("resolving AS name %q: %w", in, err)
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("invalid CIDR, IP, ASN, or AS name %q", in)
+		}
+		match, err := pickASN(in, matches)
+		if err != nil {
+			return nil, err
+		}
+		logf("%s resolved to AS%d (%s)", in, match.ASN, match.Description)
+		asns = append(asns, fmt.Sprintf("AS%d", match.ASN))
 	}
 
 	if len(asns) > 0 {

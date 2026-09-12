@@ -27,6 +27,9 @@ const DefaultPrefixOverviewURL = "https://stat.ripe.net/data/prefix-overview/dat
 // DefaultASOverviewURL is the as-overview endpoint of the RIPE Stat API.
 const DefaultASOverviewURL = "https://stat.ripe.net/data/as-overview/data.json"
 
+// DefaultSearchURL is the searchcomplete endpoint of the RIPE Stat API.
+const DefaultSearchURL = "https://stat.ripe.net/data/searchcomplete/data.json"
+
 // DefaultCacheTTL is how long fetched responses are reused from the cache.
 const DefaultCacheTTL = time.Hour
 
@@ -43,6 +46,9 @@ type Client struct {
 	// ASOverviewURL overrides the as-overview endpoint. When empty,
 	// DefaultASOverviewURL is used.
 	ASOverviewURL string
+	// SearchURL overrides the searchcomplete endpoint. When empty,
+	// DefaultSearchURL is used.
+	SearchURL string
 	// CacheDir is where fetched responses are stored. When empty, caching is
 	// disabled.
 	CacheDir string
@@ -68,6 +74,7 @@ func New() *Client {
 		HTTPClient:        &http.Client{Timeout: 30 * time.Second},
 		PrefixOverviewURL: DefaultPrefixOverviewURL,
 		ASOverviewURL:     DefaultASOverviewURL,
+		SearchURL:         DefaultSearchURL,
 		CacheDir:          DefaultCacheDir(),
 		CacheTTL:          DefaultCacheTTL,
 	}
@@ -361,6 +368,133 @@ func parseASOverview(body []byte) (string, error) {
 // asOverviewCacheKey returns the cache key for an as-overview resource.
 func asOverviewCacheKey(asn string) string {
 	return filepath.Join("as-overview", asn)
+}
+
+// ASMatch is one ASN suggestion returned by the RIPE Stat search API.
+type ASMatch struct {
+	// ASN is the AS number, e.g. 14618.
+	ASN uint32
+	// Name is the as-name portion of the description (the part before " - ").
+	Name string
+	// Description is the full description, e.g. "AMAZON-AES - Amazon.com, Inc.".
+	Description string
+}
+
+type searchResponse struct {
+	Status     string `json:"status"`
+	StatusCode int    `json:"status_code"`
+	Data       struct {
+		Categories []struct {
+			Category    string `json:"category"`
+			Suggestions []struct {
+				Value       string `json:"value"`
+				Description string `json:"description"`
+			} `json:"suggestions"`
+		} `json:"categories"`
+	} `json:"data"`
+}
+
+// SearchASNs resolves an AS name (for example "AMAZON-AES") to candidate ASNs
+// using the searchcomplete API. The response is cached when caching is enabled.
+func (c *Client) SearchASNs(ctx context.Context, query string) ([]ASMatch, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("ripestat: empty search query")
+	}
+
+	cacheKey := searchCacheKey(query)
+	if body, ok := c.readCache(cacheKey); ok {
+		if matches, err := parseSearchASNs(body); err == nil {
+			c.logf("using cached AS search for %s", query)
+			return matches, nil
+		}
+	}
+
+	base := c.SearchURL
+	if base == "" {
+		base = DefaultSearchURL
+	}
+
+	endpoint := base + "?resource=" + url.QueryEscape(query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ripestat: building request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	c.logf("Fetching %s", endpoint)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ripestat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ripestat: unexpected HTTP status %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ripestat: reading response: %w", err)
+	}
+
+	matches, err := parseSearchASNs(body)
+	if err != nil {
+		return nil, err
+	}
+	c.writeCache(cacheKey, body)
+	return matches, nil
+}
+
+// parseSearchASNs extracts ASN matches from a searchcomplete response body.
+func parseSearchASNs(body []byte) ([]ASMatch, error) {
+	var payload searchResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("ripestat: decoding response: %w", err)
+	}
+	if payload.Status != "ok" {
+		return nil, fmt.Errorf("ripestat: API status %q (HTTP %d)", payload.Status, payload.StatusCode)
+	}
+
+	seen := make(map[uint32]struct{})
+	var matches []ASMatch
+	for _, category := range payload.Data.Categories {
+		if !strings.EqualFold(category.Category, "ASNs") {
+			continue
+		}
+		for _, s := range category.Suggestions {
+			n, err := ASNNumber(s.Value)
+			if err != nil {
+				continue
+			}
+			if _, ok := seen[n]; ok {
+				continue
+			}
+			seen[n] = struct{}{}
+
+			name := s.Description
+			if i := strings.Index(name, " - "); i >= 0 {
+				name = name[:i]
+			}
+			matches = append(matches, ASMatch{
+				ASN:         n,
+				Name:        strings.TrimSpace(name),
+				Description: s.Description,
+			})
+		}
+	}
+	return matches, nil
+}
+
+// searchCacheKey returns the cache key for a searchcomplete query.
+func searchCacheKey(query string) string {
+	key := strings.NewReplacer("/", "_", ":", "_", "\\", "_", " ", "_").Replace(strings.ToUpper(query))
+	return filepath.Join("search", key)
 }
 
 // overviewCacheKey returns the cache key for a prefix-overview resource,

@@ -14,7 +14,7 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-i FILE]... [-a] [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [-q] [CIDR|IP|ASN|FILE...]
+full-reverse [-i FILE]... [-a] [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [-q] [CIDR|IP|ASN|AS-NAME|FILE...]
 ```
 
 Targets may be passed as arguments, read from files, or piped on stdin. A
@@ -22,8 +22,9 @@ plain IP such as `1.1.1.1` is treated as a `/32` prefix. Use `-i FILE` (or
 `-input FILE`) to read a list with one target per line; `-i -` reads that list
 from stdin. The flag may be repeated. A positional argument that names a
 readable file is also read as a list of targets; otherwise it is treated as a
-literal CIDR, IP, or ASN (a positional `-` reads stdin). In files and stdin,
-blank lines, `#` comments, and comma/whitespace separated values are accepted.
+literal CIDR, IP, ASN, or AS name (a positional `-` reads stdin). In files and
+stdin, blank lines, `#` comments, and comma/whitespace separated values are
+accepted.
 
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
@@ -38,10 +39,10 @@ blank lines, `#` comments, and comma/whitespace separated values are accepted.
 
 Only IPv4 is supported; plain IPs are treated as `/32`. Targets iterate over
 the whole prefix, including the network and broadcast addresses. CIDRs, IPs,
-and ASNs may be mixed freely:
+ASNs, and AS names may be mixed freely:
 
 ```sh
-full-reverse 1.1.1.0/24 8.8.8.8 AS15348
+full-reverse 1.1.1.0/24 8.8.8.8 AS15348 AMAZON-AES
 ```
 
 An ASN is expanded to its currently announced prefixes from the
@@ -49,6 +50,12 @@ An ASN is expanded to its currently announced prefixes from the
 IPv6 prefixes are ignored and duplicates are removed; the fetched prefixes are
 scanned in addition to any explicit CIDRs. ASNs accept `AS15169`, `as15169`, or
 `15169`.
+
+An AS name such as `AMAZON-AES` or `APPLE-ENGINEERING` is the aut-num's
+`as-name` (not the organization). It is resolved to an ASN via the
+[RIPE Stat searchcomplete API](https://stat.ripe.net/docs/data-api/api-endpoints/searchcomplete).
+A name that matches several ASNs (for example `GOOGLE`) is rejected with the
+candidate list; use an AS number in that case.
 
 ### Looking up an IP's ASN
 
@@ -91,6 +98,7 @@ entries are refetched and overwritten. Two kinds of responses are stored:
 - announced-prefixes results as `AS<number>.json`
 - prefix-overview results as `overview/<resource>.json`
 - as-overview results as `as-overview/AS<number>.json`
+- searchcomplete results as `search/<query>.json`
 
 Caching is best-effort: unreadable or corrupt cache files are ignored and
 never fail a run.

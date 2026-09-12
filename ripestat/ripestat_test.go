@@ -272,6 +272,45 @@ func TestASOverview(t *testing.T) {
 	}
 }
 
+func TestSearchASNs(t *testing.T) {
+	var hits atomic.Int64
+	var gotResource string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		gotResource = r.URL.Query().Get("resource")
+		io.WriteString(w, `{"status":"ok","status_code":200,"data":{"categories":[{"category":"ASNs","suggestions":[{"label":"AS14618","value":"AS14618","description":"AMAZON-AES - Amazon.com, Inc."},{"value":"AS16509","description":"AMAZON-02 - Amazon.com, Inc."},{"value":"not-an-asn","description":"junk"}]},{"category":"Prefixes","suggestions":[{"value":"8.8.8.0/24","description":"ignored"}]}]}}`)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	client := &Client{
+		HTTPClient: server.Client(),
+		SearchURL:  server.URL,
+		CacheDir:   cacheDir,
+		CacheTTL:   time.Hour,
+	}
+
+	for i := 0; i < 2; i++ {
+		matches, err := client.SearchASNs(context.Background(), "AMAZON-AES")
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if len(matches) != 2 {
+			t.Fatalf("call %d: got %d matches %v", i, len(matches), matches)
+		}
+		if matches[0].ASN != 14618 || matches[0].Name != "AMAZON-AES" || matches[0].Description != "AMAZON-AES - Amazon.com, Inc." {
+			t.Errorf("call %d: match[0] = %+v", i, matches[0])
+		}
+	}
+
+	if gotResource != "AMAZON-AES" {
+		t.Errorf("resource = %q, want AMAZON-AES", gotResource)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("server hits = %d, want 1 (cached)", got)
+	}
+}
+
 func TestCachedPrefixASNs(t *testing.T) {
 	dir := t.TempDir()
 	body := `{"status":"ok","status_code":200,"data":{"prefixes":[{"prefix":"193.0.18.0/23"},{"prefix":"2001:db8::/32"}]}}`

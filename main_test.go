@@ -80,6 +80,35 @@ func TestResultASNMarshaling(t *testing.T) {
 	}
 }
 
+func TestPickASN(t *testing.T) {
+	matches := []ripestat.ASMatch{
+		{ASN: 14618, Name: "AMAZON-AES"},
+		{ASN: 16509, Name: "AMAZON-02"},
+	}
+
+	m, err := pickASN("AMAZON-AES", matches)
+	if err != nil || m.ASN != 14618 {
+		t.Errorf("pickASN(AMAZON-AES) = %+v, %v; want AS14618", m, err)
+	}
+
+	m, err = pickASN("amazon-aes", matches)
+	if err != nil || m.ASN != 14618 {
+		t.Errorf("pickASN(amazon-aes) = %+v, %v; want AS14618", m, err)
+	}
+
+	m, err = pickASN("anything", []ripestat.ASMatch{{ASN: 1, Name: "X"}})
+	if err != nil || m.ASN != 1 {
+		t.Errorf("pickASN single = %+v, %v; want AS1", m, err)
+	}
+
+	if _, err := pickASN("GOOGLE", []ripestat.ASMatch{{ASN: 1, Name: "GOOGLE"}, {ASN: 2, Name: "GOOGLE"}}); err == nil {
+		t.Error("pickASN ambiguous exact: expected error")
+	}
+	if _, err := pickASN("X", []ripestat.ASMatch{{ASN: 1, Name: "A"}, {ASN: 2, Name: "B"}}); err == nil {
+		t.Error("pickASN ambiguous fuzzy: expected error")
+	}
+}
+
 func TestPTRNames(t *testing.T) {
 	resp := new(dns.Msg)
 	resp.Answer = []dns.RR{
