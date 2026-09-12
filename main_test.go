@@ -50,7 +50,7 @@ func TestASNIndex(t *testing.T) {
 		{ip: "11.0.0.1", wantASN: 0, wantOK: false}, // no match
 	}
 	for _, tt := range tests {
-		asn, ok := x.lookup(netip.MustParseAddr(tt.ip))
+		asn, _, ok := x.lookup(netip.MustParseAddr(tt.ip))
 		if ok != tt.wantOK || asn != tt.wantASN {
 			t.Errorf("lookup(%s) = (%d, %v), want (%d, %v)", tt.ip, asn, ok, tt.wantASN, tt.wantOK)
 		}
@@ -58,20 +58,27 @@ func TestASNIndex(t *testing.T) {
 }
 
 func TestResultASNMarshaling(t *testing.T) {
-	unknown, err := json.Marshal(Result{IP: "192.0.2.1", Prefix: "192.0.2.1/32", PTR: []string{}})
+	unknown, err := json.Marshal(Result{IP: "192.0.2.1", Target: "192.0.2.1", PTR: []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(unknown), `"asn":null`) || !strings.Contains(string(unknown), `"as_name":null`) || !strings.Contains(string(unknown), `"as_org":null`) {
-		t.Errorf("unknown AS marshaled as %s, want null asn, as_name and as_org", unknown)
+	if !strings.Contains(string(unknown), `"prefix":null`) || !strings.Contains(string(unknown), `"asn":null`) || !strings.Contains(string(unknown), `"as_name":null`) || !strings.Contains(string(unknown), `"as_org":null`) {
+		t.Errorf("unknown AS marshaled as %s, want null prefix, asn, as_name and as_org", unknown)
 	}
 
 	asn := uint32(15169)
 	name := "GOOGLE"
 	org := "Google LLC"
-	known, err := json.Marshal(Result{IP: "8.8.8.8", Prefix: "8.8.8.8/32", ASN: &asn, ASName: &name, ASOrg: &org, PTR: []string{"dns.google"}})
+	prefix := "8.8.8.0/24"
+	known, err := json.Marshal(Result{IP: "8.8.8.8", Target: "8.8.8.8", Prefix: &prefix, ASN: &asn, ASName: &name, ASOrg: &org, PTR: []string{"dns.google"}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(known), `"target":"8.8.8.8"`) {
+		t.Errorf("target not found in %s", known)
+	}
+	if !strings.Contains(string(known), `"prefix":"8.8.8.0/24"`) {
+		t.Errorf("prefix not found in %s", known)
 	}
 	if !strings.Contains(string(known), `"asn":15169`) {
 		t.Errorf("known ASN marshaled as %s, want \"asn\":15169", known)

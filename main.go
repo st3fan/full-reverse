@@ -29,7 +29,8 @@ var errNotFound = errors.New("no such host")
 // Result is one JSONL record emitted per IP address.
 type Result struct {
 	IP     string   `json:"ip"`
-	Prefix string   `json:"prefix"`
+	Target string   `json:"target"`
+	Prefix *string  `json:"prefix"`
 	ASN    *uint32  `json:"asn"`
 	ASName *string  `json:"as_name"`
 	ASOrg  *string  `json:"as_org"`
@@ -39,6 +40,7 @@ type Result struct {
 
 // target is one prefix to scan together with where it came from.
 type target struct {
+	label  string // target as given by the user (CIDR, IP, ASN, or AS name)
 	prefix netip.Prefix
 	asn    uint32 // announcing AS number, 0 for explicitly provided CIDRs
 	asName string // announcing AS name, empty when unknown
@@ -163,18 +165,18 @@ func (x *asnIndex) add(p netip.Prefix, asn uint32) {
 	x.mu.Unlock()
 }
 
-// lookup returns the AS number of the most specific known prefix containing
-// addr, or 0 when there is no match.
-func (x *asnIndex) lookup(addr netip.Addr) (uint32, bool) {
+// lookup returns the AS number and BGP prefix of the most specific known
+// prefix containing addr, or 0/false when there is no match.
+func (x *asnIndex) lookup(addr netip.Addr) (uint32, netip.Prefix, bool) {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
 	for bits := addr.BitLen(); bits >= 0; bits-- {
 		p := netip.PrefixFrom(addr, bits).Masked()
 		if asn, ok := x.byNet[p]; ok {
-			return asn, true
+			return asn, p, true
 		}
 	}
-	return 0, false
+	return 0, netip.Prefix{}, false
 }
 
 // asnResolver determines the announcing AS (number, name, and organization) for
@@ -187,34 +189,35 @@ type asnResolver struct {
 	names  map[uint32]ripestat.ASInfo
 }
 
-// resolve returns the AS number and info for ip, or 0/zero when unknown. All
-// lookups are serialized, which also avoids duplicate API calls for the same
-// prefix.
-func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, ripestat.ASInfo) {
+// resolve returns the AS number, AS info, and BGP prefix for ip. The prefix is
+// invalid when BGP/AS information is not available. All lookups are serialized,
+// which also avoids duplicate API calls for the same prefix.
+func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, ripestat.ASInfo, netip.Prefix) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	asn, _ := r.index.lookup(ip)
-	if asn == 0 {
-		overview, err := r.client.PrefixOverview(ctx, ip.String())
-		if err != nil {
-			logf("warning: AS lookup for %s failed: %v", ip, err)
-			return 0, ripestat.ASInfo{}
-		}
-		asn = overview.ASN
-		if overview.Prefix.IsValid() {
-			r.index.add(overview.Prefix, overview.ASN)
-		}
-		if asn != 0 && (overview.ASName != "" || overview.ASOrg != "") {
-			info := ripestat.ASInfo{Name: overview.ASName, Org: overview.ASOrg}
-			r.rememberLocked(asn, info)
-			return asn, info
-		}
+	if asn, prefix, ok := r.index.lookup(ip); ok {
+		return asn, r.nameLocked(ctx, asn), prefix
 	}
-	if asn == 0 {
-		return 0, ripestat.ASInfo{}
+
+	overview, err := r.client.PrefixOverview(ctx, ip.String())
+	if err != nil {
+		logf("warning: AS lookup for %s failed: %v", ip, err)
+		return 0, ripestat.ASInfo{}, netip.Prefix{}
 	}
-	return asn, r.nameLocked(ctx, asn)
+	if overview.Prefix.IsValid() {
+		r.index.add(overview.Prefix, overview.ASN)
+	}
+	if overview.ASN == 0 {
+		return 0, ripestat.ASInfo{}, netip.Prefix{}
+	}
+	info := ripestat.ASInfo{Name: overview.ASName, Org: overview.ASOrg}
+	if info.Name != "" || info.Org != "" {
+		r.rememberLocked(overview.ASN, info)
+	} else {
+		info = r.nameLocked(ctx, overview.ASN)
+	}
+	return overview.ASN, info, overview.Prefix
 }
 
 // nameLocked returns the AS info for asn, consulting the in-memory map and then
@@ -349,7 +352,7 @@ func main() {
 				defer func() { <-sem }()
 				defer reportProgress(&scanned, &resolved, total, start)
 
-				res := Result{IP: ip.String(), Prefix: t.prefix.String(), PTR: []string{}}
+				res := Result{IP: ip.String(), Target: t.label, PTR: []string{}}
 
 				if t.asn != 0 {
 					asn := t.asn
@@ -362,9 +365,12 @@ func main() {
 						org := t.asOrg
 						res.ASOrg = &org
 					}
+					// The announced prefix is known from the AS expansion.
+					prefix := t.prefix.String()
+					res.Prefix = &prefix
 				} else if asnRes != nil {
 					// A lookup that yields nothing leaves the fields nil, i.e. null.
-					asn, info := asnRes.resolve(ctx, ip)
+					asn, info, prefix := asnRes.resolve(ctx, ip)
 					if asn != 0 {
 						res.ASN = &asn
 					}
@@ -375,6 +381,10 @@ func main() {
 					if info.Org != "" {
 						org := info.Org
 						res.ASOrg = &org
+					}
+					if prefix.IsValid() {
+						p := prefix.String()
+						res.Prefix = &p
 					}
 				}
 
@@ -645,6 +655,12 @@ func pickASN(name string, matches []ripestat.ASMatch) (ripestat.ASMatch, error) 
 	}
 }
 
+// asRequest is an AS to expand, remembering how the user wrote it.
+type asRequest struct {
+	resource string // canonical "AS<number>"
+	label    string // target as given by the user
+}
+
 // resolveTargets converts a mixed list of CIDRs, plain IPs, ASNs, and AS names
 // into scan targets. A plain IP is treated as a /32. ASNs ("AS15169",
 // "as15169", or bare "15169") are expanded to their announced prefixes via the
@@ -653,14 +669,14 @@ func pickASN(name string, matches []ripestat.ASMatch) (ripestat.ASMatch, error) 
 // matches more than one AS.
 func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []string) ([]target, error) {
 	var targets []target
-	var asns []string
+	var asRequests []asRequest
 
 	for _, in := range inputs {
 		if p, err := netip.ParsePrefix(in); err == nil {
 			if !p.Addr().Is4() {
 				return nil, fmt.Errorf("only IPv4 CIDRs are supported: %q", in)
 			}
-			targets = append(targets, target{prefix: p.Masked()})
+			targets = append(targets, target{label: in, prefix: p.Masked()})
 			continue
 		}
 		if a, err := netip.ParseAddr(in); err == nil {
@@ -668,11 +684,11 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			if !a.Is4() {
 				return nil, fmt.Errorf("only IPv4 addresses are supported: %q", in)
 			}
-			targets = append(targets, target{prefix: netip.PrefixFrom(a, 32)})
+			targets = append(targets, target{label: in, prefix: netip.PrefixFrom(a, 32)})
 			continue
 		}
-		if _, err := ripestat.NormalizeASN(in); err == nil {
-			asns = append(asns, in)
+		if resource, err := ripestat.NormalizeASN(in); err == nil {
+			asRequests = append(asRequests, asRequest{resource: resource, label: in})
 			continue
 		}
 
@@ -689,35 +705,29 @@ func resolveTargets(ctx context.Context, client *ripestat.Client, inputs []strin
 			return nil, err
 		}
 		logf("%s resolved to AS%d (%s)", in, match.ASN, match.Description)
-		asns = append(asns, fmt.Sprintf("AS%d", match.ASN))
+		asRequests = append(asRequests, asRequest{resource: fmt.Sprintf("AS%d", match.ASN), label: in})
 	}
 
-	if len(asns) > 0 {
-		for _, asn := range asns {
-			resource, err := ripestat.NormalizeASN(asn)
-			if err != nil {
-				return nil, err
-			}
-			number, err := ripestat.ASNNumber(resource)
-			if err != nil {
-				return nil, err
-			}
-			info, err := client.ASOverview(ctx, resource)
-			if err != nil {
-				return nil, err
-			}
-			announced, err := client.AnnouncedPrefixes(ctx, resource)
-			if err != nil {
-				return nil, err
-			}
-			list := make([]string, len(announced))
-			for i, p := range announced {
-				list[i] = p.String()
-			}
-			logf("%s: %d announced IPv4 prefix(es): %s", resource, len(announced), strings.Join(list, ", "))
-			for _, p := range announced {
-				targets = append(targets, target{prefix: p, asn: number, asName: info.Name, asOrg: info.Org})
-			}
+	for _, req := range asRequests {
+		number, err := ripestat.ASNNumber(req.resource)
+		if err != nil {
+			return nil, err
+		}
+		info, err := client.ASOverview(ctx, req.resource)
+		if err != nil {
+			return nil, err
+		}
+		announced, err := client.AnnouncedPrefixes(ctx, req.resource)
+		if err != nil {
+			return nil, err
+		}
+		list := make([]string, len(announced))
+		for i, p := range announced {
+			list[i] = p.String()
+		}
+		logf("%s: %d announced IPv4 prefix(es): %s", req.resource, len(announced), strings.Join(list, ", "))
+		for _, p := range announced {
+			targets = append(targets, target{label: req.label, prefix: p, asn: number, asName: info.Name, asOrg: info.Org})
 		}
 	}
 
