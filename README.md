@@ -14,7 +14,7 @@ go build -o full-reverse .
 ## Usage
 
 ```
-full-reverse [-i FILE]... [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [CIDR|IP|ASN|FILE...]
+full-reverse [-i FILE]... [-d DNS_SERVER]... [-c CONCURRENCY] [-r RETRIES] [-t TIMEOUT] [-q] [CIDR|IP|ASN|FILE...]
 ```
 
 Targets may be passed as arguments, read from files, or piped on stdin. A
@@ -32,6 +32,7 @@ blank lines, `#` comments, and comma/whitespace separated values are accepted.
 | `-c` | `32` | number of concurrent reverse lookups |
 | `-r` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
 | `-t` | `2.5s` | timeout per attempt |
+| `-q`, `-quiet` | `false` | silence progress and summary logging |
 | `-forward-confirmed-only` | `false` | only report PTR records that forward-confirm (see below) |
 
 Only IPv4 is supported; plain IPs are treated as `/32`. Targets iterate over
@@ -84,7 +85,8 @@ lookup. NXDOMAIN or a failed forward lookup counts as not confirmed.
 ## Output
 
 JSONL on stdout. Progress and a final summary are logged to stderr, each line
-prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone.
+prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone;
+`-q`/`-quiet` silences these log lines (fatal errors are still printed).
 The run starts with a line stating how many IPs will be looked up. Each ASN
 expands to a line listing all of its announced IPv4 prefixes. For runs larger
 than a /24, an intermediate progress line is emitted for every 256 IPs scanned,

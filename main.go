@@ -158,6 +158,8 @@ func main() {
 	flag.Var(&dnsServers, "d", "DNS server to use (e.g. 8.8.8.8:53); repeatable, defaults to system resolver")
 	flag.Var(&inputFiles, "i", "read targets from a file, one per line; use - for stdin")
 	flag.Var(&inputFiles, "input", "read targets from a file, one per line; use - for stdin")
+	flag.BoolVar(&quiet, "q", false, "silence progress and summary logging")
+	flag.BoolVar(&quiet, "quiet", false, "silence progress and summary logging")
 	flag.BoolVar(&forwardConfirmedOnly, "forward-confirmed-only", false, "only report PTR records whose name resolves back to the same IP")
 	flag.IntVar(&concurrency, "c", 32, "number of concurrent reverse lookups")
 	flag.IntVar(&retries, "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
@@ -331,6 +333,9 @@ func forwardConfirms(ctx context.Context, dr *dnsResolver, name string, ip netip
 // JSONL records and progress lines never interleave on the same file/pipe.
 var outMu sync.Mutex
 
+// quiet suppresses progress and summary logging when set via -q/-quiet.
+var quiet bool
+
 // emit writes one JSON record followed by a newline to stdout.
 func emit(r Result) {
 	b, err := json.Marshal(r)
@@ -359,8 +364,12 @@ func reportProgress(scanned, resolved *atomic.Uint64, total uint64, start time.T
 }
 
 // logf writes a timestamped progress line to stderr. The timestamp is RFC 3339
-// (ISO 8601) in the system's local timezone.
+// (ISO 8601) in the system's local timezone. When quiet is set, nothing is
+// written.
 func logf(format string, args ...any) {
+	if quiet {
+		return
+	}
 	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
 
 	outMu.Lock()
