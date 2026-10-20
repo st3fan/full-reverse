@@ -124,17 +124,8 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 			dr.sendBudget = func(ctx context.Context) (*sendPermit, error) { return scheduler.wait(ctx, i) }
 		}
 	}
-	iterator := targetIterator{targets: targets}
-	sequence := 0
-	_, scheduleErr := scheduler.run(ctx, func() *scheduledTask {
-		ip, target, ok := iterator.next()
-		if !ok {
-			return nil
-		}
-		index := sequence % len(resolvers)
-		sequence++
-		return newLookupJob(ip, target, index, resolvers[index], opts, asnRes, progress)
-	})
+	scheduleErr := runLookupPipeline(ctx, scheduler, targets, resolvers, opts, asnRes, progress)
+
 	if err := out.failure(); err != nil {
 		return err
 	}

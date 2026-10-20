@@ -41,7 +41,7 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	flags.BoolVarP(&quiet, "quiet", "q", false, "silence progress and summary logging")
 	flags.BoolVarP(&lookupAS, "lookup-as", "a", false, "look up the announcing ASN for IPs whose ASN is not already known")
 	flags.BoolVarP(&forwardConfirmedOnly, "forward-confirmed-only", "f", false, "only report PTR records whose name resolves back to the same IP")
-	flags.IntVarP(&concurrency, "concurrency", "c", 32, "maximum active DNS attempts or ASN preparation steps")
+	flags.IntVarP(&concurrency, "concurrency", "c", 32, "maximum active DNS attempts")
 	flags.IntVarP(&retries, "retries", "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
 	flags.IntVar(&rate, "rate", 0, "maximum total DNS sends/second (0 disables pacing)")
 	flags.IntVar(&resolverRate, "resolver-rate", 0, "maximum DNS sends/second per configured resolver (0 disables pacing)")

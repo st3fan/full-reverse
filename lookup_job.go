@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,9 +54,13 @@ type lookupJob struct {
 	attempt          int
 	names, confirmed []string
 	nameIndex        int
+	emitResult       bool
+	completed        func(*lookupJob)
+	joinMu           sync.Mutex
+	pending          int
 }
 
-func newLookupJob(ip netip.Addr, t target, index int, dr *dnsResolver, opts lookupOptions, asn *asnResolver, progress *lookupProgress) *scheduledTask {
+func newLookupJob(ip netip.Addr, t target, index int, dr *dnsResolver, opts lookupOptions, progress *lookupProgress) *lookupJob {
 	reverse, _ := dns.ReverseAddr(ip.String()) // Iterator addresses are always IPv4.
 	j := &lookupJob{ip: ip, result: Result{IP: ip.String(), Target: t.label, PTR: []string{}}, resolver: dr, opts: opts, progress: progress, name: reverse, qtype: dns.TypePTR}
 	j.task = scheduledTask{resolver: index, paced: true, run: j.run}
@@ -70,40 +75,44 @@ func newLookupJob(ip netip.Addr, t target, index int, dr *dnsResolver, opts look
 			org := t.asOrg
 			j.result.ASOrg = &org
 		}
-	} else if asn != nil {
-		j.task.paced = false
-		j.task.run = func(ctx context.Context, _ *sendPermit) taskCompletion {
-			number, info, prefix := asn.resolve(ctx, ip)
-			if ctx.Err() != nil {
-				return taskCompletion{}
-			}
-			if number != 0 {
-				j.result.ASN = &number
-			}
-			if info.Name != "" {
-				j.result.ASName = &info.Name
-			}
-			if info.Org != "" {
-				j.result.ASOrg = &info.Org
-			}
-			if prefix.IsValid() {
-				text := prefix.String()
-				j.result.Prefix = &text
-			}
-			j.task.paced, j.task.run = true, j.run
-			return taskCompletion{next: &j.task}
-		}
 	}
-	return &j.task
+	return j
 }
+
+func (j *lookupJob) applyMetadata(metadata asnMetadata) {
+	if metadata.asn != 0 {
+		j.result.ASN = &metadata.asn
+	}
+	if metadata.info.Name != "" {
+		j.result.ASName = &metadata.info.Name
+	}
+	if metadata.info.Org != "" {
+		j.result.ASOrg = &metadata.info.Org
+	}
+	if metadata.prefix.IsValid() {
+		prefix := metadata.prefix.String()
+		j.result.Prefix = &prefix
+	}
+}
+
 func (j *lookupJob) finish() taskCompletion {
-	j.progress.out.reportProgress(&j.progress.scanned, &j.progress.resolved, j.progress.total, j.progress.start)
+	if j.completed != nil {
+		j.completed(j)
+	} else {
+		j.finalize()
+	}
 	return taskCompletion{}
+}
+func (j *lookupJob) finalize() {
+	if j.emitResult {
+		j.progress.out.emit(j.result)
+	}
+	j.progress.out.reportProgress(&j.progress.scanned, &j.progress.resolved, j.progress.total, j.progress.start)
 }
 func (j *lookupJob) emit() taskCompletion {
 	j.result.PTR = j.confirmed
 	j.progress.resolved.Add(1)
-	j.progress.out.emit(j.result)
+	j.emitResult = true
 	return j.finish()
 }
 func (j *lookupJob) run(ctx context.Context, permit *sendPermit) taskCompletion {
@@ -130,7 +139,7 @@ func (j *lookupJob) run(ctx context.Context, permit *sendPermit) taskCompletion 
 			} else {
 				j.result.Error = err.Error()
 				j.progress.failed.Add(1)
-				j.progress.out.emit(j.result)
+				j.emitResult = true
 			}
 			return j.finish()
 		}
