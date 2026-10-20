@@ -98,8 +98,12 @@ Before calling the API, the tool loads every cached announced-prefixes
 response and indexes the prefixes they contain, so an IP covered by a cached
 AS prefix resolves without a network call. Prefixes learned from `AS` targets
 and from earlier lookups in the same run are indexed too, and API lookups are
-serialized so each covering prefix is queried at most once. Cache hits and
-outgoing API requests are logged to stderr, e.g.:
+serialized to avoid duplicate work. Successful unknown-AS responses are also
+remembered for the duration of the run: a reported IPv4 prefix covering the
+queried address is reused for that prefix; otherwise only that address is
+remembered. Known ASN entries take precedence, and failed API requests remain
+eligible for retry. Cache hits and outgoing API requests are logged to stderr,
+e.g.:
 
 ```
 RIPE Stat: using cached announced-prefixes for AS3333

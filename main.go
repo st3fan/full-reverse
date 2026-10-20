@@ -184,10 +184,11 @@ func (x *asnIndex) lookup(addr netip.Addr) (uint32, netip.Prefix, bool) {
 // an IP. It consults prefixes already known from the cache or AS targets before
 // calling RIPE Stat, and records learned prefixes so later lookups are free.
 type asnResolver struct {
-	client *ripestat.Client
-	index  *asnIndex
-	mu     sync.Mutex // serializes API lookups and avoids duplicate work
-	names  map[uint32]ripestat.ASInfo
+	client  *ripestat.Client
+	index   *asnIndex
+	mu      sync.Mutex // serializes API lookups and avoids duplicate work
+	names   map[uint32]ripestat.ASInfo
+	unknown map[netip.Prefix]struct{} // successful unknown-AS results, scoped to this run
 }
 
 // resolve returns the AS number, AS info, and BGP prefix for ip. The prefix is
@@ -200,6 +201,11 @@ func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, ripes
 	if asn, prefix, ok := r.index.lookup(ip); ok {
 		return asn, r.nameLocked(ctx, asn), prefix
 	}
+	for bits := ip.BitLen(); bits >= 0; bits-- {
+		if _, ok := r.unknown[netip.PrefixFrom(ip, bits).Masked()]; ok {
+			return 0, ripestat.ASInfo{}, netip.Prefix{}
+		}
+	}
 
 	overview, err := r.client.PrefixOverview(ctx, ip.String())
 	if err != nil {
@@ -210,6 +216,14 @@ func (r *asnResolver) resolve(ctx context.Context, ip netip.Addr) (uint32, ripes
 		r.index.add(overview.Prefix, overview.ASN)
 	}
 	if overview.ASN == 0 {
+		prefix := overview.Prefix
+		if !prefix.IsValid() || !prefix.Addr().Is4() || !prefix.Contains(ip) {
+			prefix = netip.PrefixFrom(ip, 32)
+		}
+		if r.unknown == nil {
+			r.unknown = make(map[netip.Prefix]struct{})
+		}
+		r.unknown[prefix.Masked()] = struct{}{}
 		return 0, ripestat.ASInfo{}, netip.Prefix{}
 	}
 	info := ripestat.ASInfo{Name: overview.ASName, Org: overview.ASOrg}
