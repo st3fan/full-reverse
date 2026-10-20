@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,45 +19,112 @@ func (log logFunc) printf(format string, args ...any) {
 	}
 }
 
-// runOutput owns per-run output synchronization and the first write error.
-// Writes remain unbuffered; output queues and batching belong to a later change.
+const (
+	outputQueueSize     = 64
+	outputBufferSize    = 64 << 10
+	outputFlushInterval = 100 * time.Millisecond
+)
+
+// One owner serializes stdout. Producers queue complete records with bounded
+// backpressure. Error bookkeeping never holds a lock across a writer call.
 type runOutput struct {
-	stdout, stderr io.Writer
-	quiet          bool
-	cancel         context.CancelFunc
-	mu             sync.Mutex
-	err            error
+	stderr     io.Writer
+	quiet      bool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	records    chan []byte
+	done       chan struct{}
+	finishOnce sync.Once
+	mu         sync.Mutex
+	err        error
+	stderrMu   sync.Mutex
 }
 
-func (out *runOutput) write(w io.Writer, stream string, b []byte) {
-	out.mu.Lock()
-	defer out.mu.Unlock()
-	if out.err != nil {
-		return
-	}
-	n, err := w.Write(b)
+func newRunOutput(ctx context.Context, stdout, stderr io.Writer, quiet bool, cancel context.CancelFunc) *runOutput {
+	out := &runOutput{stderr: stderr, quiet: quiet, ctx: ctx, cancel: cancel,
+		records: make(chan []byte, outputQueueSize), done: make(chan struct{})}
+	go out.writeRecords(stdout)
+	return out
+}
+
+// checkedWriter also handles short writes on bufio's direct-write path. A
+// zero-byte write with no error must become a failure rather than a retry loop.
+type checkedWriter struct{ io.Writer }
+
+func (w checkedWriter) Write(b []byte) (int, error) {
+	n, err := w.Writer.Write(b)
 	if err == nil && n != len(b) {
 		err = io.ErrShortWrite
 	}
-	if err != nil {
-		out.err = fmt.Errorf("write %s: %w", stream, err)
+	return n, err
+}
+func (out *runOutput) fail(err error) {
+	out.mu.Lock()
+	first := out.err == nil
+	if first {
+		out.err = err
+	}
+	out.mu.Unlock()
+	if first {
 		out.cancel()
 	}
 }
-
 func (out *runOutput) failure() error {
 	out.mu.Lock()
 	defer out.mu.Unlock()
 	return out.err
 }
+func (out *runOutput) writeRecords(stdout io.Writer) {
+	defer close(out.done)
+	writer := bufio.NewWriterSize(checkedWriter{stdout}, outputBufferSize)
+	ticker := time.NewTicker(outputFlushInterval)
+	defer ticker.Stop()
+	flush := func() bool {
+		if err := writer.Flush(); err != nil {
+			out.fail(fmt.Errorf("write stdout (flush): %w", err))
+			return false
+		}
+		return true
+	}
+	for {
+		select {
+		case record, ok := <-out.records:
+			if !ok {
+				flush()
+				return
+			}
+			if _, err := writer.Write(record); err != nil {
+				out.fail(fmt.Errorf("write stdout: %w", err))
+				return
+			}
+		case <-ticker.C:
+			if !flush() {
+				return
+			}
+		}
+	}
+}
 
+// finish is called only after all producers have joined. Even on cancellation,
+// accepted records are drained and flushed. Underlying writer failures are
+// reported; queued records cannot be delivered once that writer has failed.
+func (out *runOutput) finish() error {
+	out.finishOnce.Do(func() { close(out.records); <-out.done })
+	return out.failure()
+}
 func (out *runOutput) emit(r Result) {
-	b, err := json.Marshal(r)
-	if err != nil {
-		out.logf("error: marshal: %v", err)
+	if out.ctx.Err() != nil {
 		return
 	}
-	out.write(out.stdout, "stdout", append(b, '\n'))
+	b, err := json.Marshal(r)
+	if err != nil {
+		out.fail(fmt.Errorf("marshal result: %w", err))
+		return
+	}
+	select {
+	case out.records <- append(b, '\n'):
+	case <-out.ctx.Done():
+	}
 }
 
 func (out *runOutput) reportProgress(scanned, resolved *atomic.Uint64, total uint64, start time.Time) {
@@ -73,5 +141,12 @@ func (out *runOutput) logf(format string, args ...any) {
 		return
 	}
 	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
-	out.write(out.stderr, "stderr", []byte(line))
+	out.stderrMu.Lock()
+	defer out.stderrMu.Unlock()
+	if out.failure() != nil {
+		return
+	}
+	if _, err := (checkedWriter{out.stderr}).Write([]byte(line)); err != nil {
+		out.fail(fmt.Errorf("write stderr: %w", err))
+	}
 }
