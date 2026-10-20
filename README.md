@@ -5,11 +5,23 @@ CIDR (or every announced prefix of an ASN), performs a reverse lookup for every
 address using github.com/miekg/dns, and writes one JSON object per address
 (JSONL) to stdout.
 
-## Build
+## Install
+
+Requires Go 1.27.1 or later.
 
 ```sh
-go build -o full-reverse .
+go install github.com/st3fan/full-reverse@latest
 ```
+
+To install a specific version:
+
+```sh
+go install github.com/st3fan/full-reverse@v0.1.0
+```
+
+Go installs the `full-reverse` executable in `GOBIN`, or `$(go env GOPATH)/bin`
+when `GOBIN` is unset (normally `$HOME/go/bin`). Add that directory to your
+`PATH`, then run `full-reverse -h` to check the installation.
 
 ## Usage
 
@@ -155,7 +167,7 @@ Addresses with no PTR record (NXDOMAIN / no such host) are skipped silently;
 `error` is only present for real lookup failures such as timeouts or SERVFAIL.
 
 ```sh
-$ echo '1.1.1.0/30' | ./full-reverse -d 1.1.1.1 -d 8.8.8.8 -c 4
+$ echo '1.1.1.0/30' | full-reverse -d 1.1.1.1 -d 8.8.8.8 -c 4
 2026-09-11T14:35:20-04:00 looking up 4 IPs across 1 CIDR(s)
 {"ip":"1.1.1.1","target":"1.1.1.0/30","prefix":null,"asn":null,"as_name":null,"as_org":null,"ptr":["one.one.one.one"]}
 {"ip":"1.1.1.2","target":"1.1.1.0/30","prefix":null,"asn":null,"as_name":null,"as_org":null,"ptr":["security.cloudflare-dns.com"]}
