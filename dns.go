@@ -26,6 +26,7 @@ type dnsResolver struct {
 	transports map[string]*udpTransport
 	ports      *udpPortHistory
 	closed     bool
+	sendBudget func(context.Context) (*sendPermit, error)
 
 	requests atomic.Uint64
 	errors   atomic.Uint64
@@ -44,16 +45,23 @@ func (d *dnsResolver) record(elapsed time.Duration, failed bool) {
 // query performs a single DNS question, trying each configured server in
 // order. It returns errNotFound when the name does not exist.
 func (d *dnsResolver) query(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
+	return d.queryPermitted(ctx, name, qtype, false, nil)
+}
+func (d *dnsResolver) queryScheduled(ctx context.Context, name string, qtype uint16, permit *sendPermit) (*dns.Msg, error) {
+	return d.queryPermitted(ctx, name, qtype, true, permit)
+}
+func (d *dnsResolver) queryPermitted(ctx context.Context, name string, qtype uint16, prepaid bool, permit *sendPermit) (*dns.Msg, error) {
+	defer permit.finish(false)
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(name), qtype)
 	msg.RecursionDesired = true
 
 	var lastErr error
-	for _, server := range d.servers {
+	for i, server := range d.servers {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		resp, err := d.exchange(ctx, msg, server)
+		resp, err := d.exchangePermitted(ctx, msg, server, prepaid && i == 0, permitForServer(permit, i))
 		if err == nil {
 			return resp, nil
 		}
@@ -68,11 +76,34 @@ func (d *dnsResolver) query(ctx context.Context, name string, qtype uint16) (*dn
 // exchange sends msg to server over UDP, retrying over TCP if the response is
 // truncated, and maps the response code to an error.
 func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string) (*dns.Msg, error) {
+	return d.exchangePermitted(ctx, msg, server, false, nil)
+}
+func permitForServer(p *sendPermit, index int) *sendPermit {
+	if index == 0 {
+		return p
+	}
+	return nil
+}
+func (d *dnsResolver) exchangePermitted(ctx context.Context, msg *dns.Msg, server string, prepaid bool, permit *sendPermit) (*dns.Msg, error) {
+	if !prepaid && d.sendBudget != nil {
+		var err error
+		permit, err = d.sendBudget(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer permit.finish(false)
 	transport, err := d.transport(server)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := transport.exchange(ctx, msg)
+	var notify func()
+	if permit != nil {
+		notify = func() { permit.finish(true) }
+	}
+	resp, err := transport.exchangeNotified(ctx, msg, notify)
+	// Release an unused initial grant before trying another system nameserver.
+	permit.finish(false)
 	if err != nil {
 		return nil, fmt.Errorf("query %s on %s: %w", msg.Question[0].Name, server, err)
 	}
@@ -82,7 +113,7 @@ func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		resp, _, err = exchangeContext(ctx, d.tcp, msg, server)
+		resp, _, err = exchangeContextBudget(ctx, d.tcp, msg, server, d.sendBudget)
 		<-d.tcpSlots
 		if err != nil {
 			return nil, fmt.Errorf("query %s on %s (tcp): %w", msg.Question[0].Name, server, err)
@@ -135,9 +166,15 @@ func (d *dnsResolver) close() {
 
 // exchangeContext retains per-exchange connections and closes pending reads on cancellation.
 func exchangeContext(ctx context.Context, client *dns.Client, msg *dns.Msg, server string) (*dns.Msg, time.Duration, error) {
+	return exchangeContextBudget(ctx, client, msg, server, nil)
+}
+func exchangeContextBudget(ctx context.Context, client *dns.Client, msg *dns.Msg, server string, budget func(context.Context) (*sendPermit, error)) (*dns.Msg, time.Duration, error) {
 	conn, err := client.DialContext(ctx, server)
 	if err != nil {
 		return nil, 0, err
+	}
+	if budget != nil {
+		conn.Conn = &pacedTCPConn{Conn: conn.Conn, ctx: ctx, budget: budget}
 	}
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -175,44 +212,31 @@ func aRecords(resp *dns.Msg) []netip.Addr {
 	return addrs
 }
 
-// lookupWithRetries performs a DNS query, retrying timeouts and other
-// non-NXDOMAIN errors up to retries times. Each attempt gets its own timeout.
-// The returned error is the last one seen; NXDOMAIN is returned immediately
-// without retrying. Per-attempt timing is recorded on dr.
-func lookupWithRetries(ctx context.Context, dr *dnsResolver, name string, qtype uint16, timeout time.Duration, retries int) (*dns.Msg, error) {
-	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		lctx, cancel := context.WithTimeout(ctx, timeout)
-		begin := time.Now()
-		resp, err := dr.query(lctx, name, qtype)
-		cancel()
-		dr.record(time.Since(begin), err != nil && !errors.Is(err, errNotFound))
-		if err == nil {
-			return resp, nil
-		}
-		if errors.Is(err, errNotFound) {
-			return nil, err
-		}
-		lastErr = err
-	}
-	return nil, lastErr
+// One TCP message consumes one permit, including when the write fails. Waiting
+// happens after dialing so connection setup never holds the global send grant.
+type pacedTCPConn struct {
+	net.Conn
+	ctx     context.Context
+	budget  func(context.Context) (*sendPermit, error)
+	started bool
 }
 
-// forwardConfirms reports whether name resolves (A) to ip.
-func forwardConfirms(ctx context.Context, dr *dnsResolver, name string, ip netip.Addr, timeout time.Duration, retries int) bool {
-	resp, err := lookupWithRetries(ctx, dr, name, dns.TypeA, timeout, retries)
+func (c *pacedTCPConn) Write(data []byte) (int, error) {
+	if c.started {
+		return c.Conn.Write(data)
+	}
+	c.started = true
+	permit, err := c.budget(c.ctx)
 	if err != nil {
-		return false
+		return 0, err
 	}
-	for _, a := range aRecords(resp) {
-		if a == ip {
-			return true
-		}
+	defer permit.finish(false)
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
 	}
-	return false
+	n, err := c.Conn.Write(data)
+	permit.finish(true)
+	return n, err
 }
 
 // buildResolvers builds one dnsResolver per -d value, or a single resolver

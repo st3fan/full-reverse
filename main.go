@@ -32,6 +32,7 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		lookupAS             bool
 		concurrency          int
 		retries              int
+		rate, resolverRate   int
 		timeout              time.Duration
 	)
 
@@ -40,8 +41,10 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	flags.BoolVarP(&quiet, "quiet", "q", false, "silence progress and summary logging")
 	flags.BoolVarP(&lookupAS, "lookup-as", "a", false, "look up the announcing ASN for IPs whose ASN is not already known")
 	flags.BoolVarP(&forwardConfirmedOnly, "forward-confirmed-only", "f", false, "only report PTR records whose name resolves back to the same IP")
-	flags.IntVarP(&concurrency, "concurrency", "c", 32, "number of concurrent reverse lookups")
+	flags.IntVarP(&concurrency, "concurrency", "c", 32, "maximum active DNS attempts or ASN preparation steps")
 	flags.IntVarP(&retries, "retries", "r", 4, "retries for timeouts and I/O errors (NXDOMAIN is never retried)")
+	flags.IntVar(&rate, "rate", 0, "maximum total DNS sends/second (0 disables pacing)")
+	flags.IntVar(&resolverRate, "resolver-rate", 0, "maximum DNS sends/second per configured resolver (0 disables pacing)")
 	flags.DurationVarP(&timeout, "timeout", "t", 2500*time.Millisecond, "per-attempt lookup timeout")
 
 	flags.Usage = func() {
@@ -70,10 +73,14 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return 2
 	}
 
+	if err := validateRates(rate, resolverRate); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 2
+	}
 	inputs, err := readInputs(ctx, stdin, flags.Args(), inputFiles)
 	if err == nil {
 		err = runLookups(ctx, lookupOptions{
-			dnsServers: dnsServers, concurrency: concurrency, retries: retries,
+			rate: rate, resolverRate: resolverRate, dnsServers: dnsServers, concurrency: concurrency, retries: retries,
 			timeout: timeout, lookupAS: lookupAS, forwardConfirmedOnly: forwardConfirmedOnly, quiet: quiet,
 		}, inputs, stdout, stderr, services)
 	}

@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
 	"github.com/st3fan/full-reverse/ripestat"
 )
 
@@ -32,6 +29,7 @@ type cliServices struct {
 type lookupOptions struct {
 	dnsServers                            []string
 	concurrency, retries                  int
+	rate, resolverRate                    int
 	timeout                               time.Duration
 	lookupAS, forwardConfirmedOnly, quiet bool
 }
@@ -42,6 +40,9 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 	}
 	if opts.retries < 0 {
 		return fmt.Errorf("retry count must be >= 0")
+	}
+	if err := validateRates(opts.rate, opts.resolverRate); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -113,136 +114,39 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 	out.logf("looking up %d IPs across %d CIDR(s)", total, len(targets))
 
 	start := time.Now()
-	var scanned, resolved, notFound, unconfirmed, failed atomic.Uint64
-	var rr atomic.Uint64
-
-	sem := make(chan struct{}, opts.concurrency)
-	var wg sync.WaitGroup
-
-scan:
-	for _, t := range targets {
-		for addr := t.prefix.Masked().Addr(); t.prefix.Contains(addr); addr = addr.Next() {
-			ip := addr
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				break scan
-			}
-			if ctx.Err() != nil {
-				<-sem
-				break scan
-			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-sem }()
-				defer out.reportProgress(&scanned, &resolved, total, start)
-
-				res := Result{IP: ip.String(), Target: t.label, PTR: []string{}}
-
-				if t.asn != 0 {
-					asn := t.asn
-					res.ASN = &asn
-					if t.asName != "" {
-						name := t.asName
-						res.ASName = &name
-					}
-					if t.asOrg != "" {
-						org := t.asOrg
-						res.ASOrg = &org
-					}
-					// The announced prefix is known from the AS expansion.
-					prefix := t.prefix.String()
-					res.Prefix = &prefix
-				} else if asnRes != nil {
-					// A lookup that yields nothing leaves the fields nil, i.e. null.
-					asn, info, prefix := asnRes.resolve(ctx, ip)
-					if asn != 0 {
-						res.ASN = &asn
-					}
-					if info.Name != "" {
-						name := info.Name
-						res.ASName = &name
-					}
-					if info.Org != "" {
-						org := info.Org
-						res.ASOrg = &org
-					}
-					if prefix.IsValid() {
-						p := prefix.String()
-						res.Prefix = &p
-					}
-				}
-
-				if ctx.Err() != nil {
-					return
-				}
-				idx := rr.Add(1) - 1
-				dr := resolvers[idx%uint64(len(resolvers))]
-
-				reverse, err := dns.ReverseAddr(ip.String())
-				if err != nil {
-					res.Error = err.Error()
-					failed.Add(1)
-					out.emit(res)
-					return
-				}
-
-				resp, err := lookupWithRetries(ctx, dr, reverse, dns.TypePTR, opts.timeout, opts.retries)
-				if ctx.Err() != nil {
-					return
-				}
-				if err != nil {
-					// A missing PTR record is expected and not interesting; skip it.
-					if errors.Is(err, errNotFound) {
-						notFound.Add(1)
-						return
-					}
-					res.Error = err.Error()
-					failed.Add(1)
-					out.emit(res)
-					return
-				}
-
-				names := ptrNames(resp)
-
-				// Forward confirmation: keep only names whose A record maps back
-				// to the queried IP.
-				if opts.forwardConfirmedOnly {
-					confirmed := names[:0]
-					for _, name := range names {
-						if forwardConfirms(ctx, dr, name, ip, opts.timeout, opts.retries) {
-							confirmed = append(confirmed, name)
-						}
-					}
-					names = confirmed
-					if len(names) == 0 {
-						unconfirmed.Add(1)
-						return
-					}
-				}
-
-				if len(names) == 0 {
-					notFound.Add(1)
-					return
-				}
-				res.PTR = names
-				resolved.Add(1)
-				out.emit(res)
-			}()
+	progress := &lookupProgress{out: out, total: total, start: start}
+	scheduler, err := newTaskScheduler(schedulerConfig{concurrency: opts.concurrency, resolvers: len(resolvers), rate: opts.rate, resolverRate: opts.resolverRate})
+	if err != nil {
+		return err
+	}
+	for i, dr := range resolvers {
+		if scheduler.enabled() {
+			dr.sendBudget = func(ctx context.Context) (*sendPermit, error) { return scheduler.wait(ctx, i) }
 		}
 	}
-
-	wg.Wait()
+	iterator := targetIterator{targets: targets}
+	sequence := 0
+	_, scheduleErr := scheduler.run(ctx, func() *scheduledTask {
+		ip, target, ok := iterator.next()
+		if !ok {
+			return nil
+		}
+		index := sequence % len(resolvers)
+		sequence++
+		return newLookupJob(ip, target, index, resolvers[index], opts, asnRes, progress)
+	})
 	if err := out.failure(); err != nil {
 		return err
+	}
+	if scheduleErr != nil {
+		return scheduleErr
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	out.logf("done: %d IPs looked up, %d resolved, %d without PTR, %d unconfirmed, %d failed in %s",
-		total, resolved.Load(), notFound.Load(), unconfirmed.Load(), failed.Load(),
+		total, progress.resolved.Load(), progress.notFound.Load(), progress.unconfirmed.Load(), progress.failed.Load(),
 		time.Since(start).Round(time.Millisecond))
 
 	for _, dr := range resolvers {
