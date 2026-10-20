@@ -181,6 +181,12 @@ func (t *udpTransport) reserve(ctx context.Context, q *dns.Msg) (*udpSession, ui
 }
 
 func (t *udpTransport) exchange(parent context.Context, q *dns.Msg) (*dns.Msg, error) {
+	return t.exchangeNotified(parent, q, nil)
+}
+
+// onSend observes the write boundary so pacing follows actual send attempts,
+// not receiver completion or a permit granted before a goroutine was scheduled.
+func (t *udpTransport) exchangeNotified(parent context.Context, q *dns.Msg, onSend func()) (*dns.Msg, error) {
 	if len(q.Question) != 1 {
 		return nil, fmt.Errorf("DNS transport requires one question")
 	}
@@ -225,6 +231,9 @@ func (t *udpTransport) exchange(parent context.Context, q *dns.Msg) (*dns.Msg, e
 		err = s.conn.SetWriteDeadline(deadline)
 		if err == nil {
 			_, err = s.conn.Write(wire)
+			if onSend != nil {
+				onSend()
+			}
 		}
 	}
 	<-s.writes

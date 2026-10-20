@@ -524,3 +524,29 @@ func TestUDPTransportRefusedPeerRecovery(t *testing.T) {
 		t.Fatal(r.err)
 	}
 }
+
+func TestUDPWriteNotificationPrecedesReply(t *testing.T) {
+	f := rawDNS(t, "udp4", "127.0.0.1:0")
+	tr := testUDPTransport(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sent := make(chan struct{}, 1)
+	done := make(chan dnsReply, 1)
+	go func() {
+		q := new(dns.Msg)
+		q.SetQuestion("1.2.0.192.in-addr.arpa.", dns.TypePTR)
+		m, err := tr.exchangeNotified(ctx, q, func() { sent <- struct{}{} })
+		done <- dnsReply{m, err}
+	}()
+	q := f.request(t)
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("write notification waited for the response")
+	}
+	assertNoDNS(t, done)
+	f.reply(t, q, nil)
+	if r := awaitDNS(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+}
