@@ -124,3 +124,6 @@ python3 -B -m unittest discover -s scripts
 
 The [scheduler comparison](SCHEDULER.md) records throughput, completeness,
 and scaling after introducing bounded attempt scheduling and optional pacing.
+
+The [ASN enrichment comparison](ENRICHMENT.md) records the cost and completeness
+of independently scheduled DNS and metadata work.

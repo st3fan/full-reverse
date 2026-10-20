@@ -47,7 +47,7 @@ accepted.
 | `-i`, `--input` | – | read targets from a file, one per line; use `-` for stdin; may be repeated |
 | `-a`, `--lookup-as` | `false` | look up the announcing ASN for IPs whose ASN is not already known |
 | `-d`, `--dns-server` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
-| `-c`, `--concurrency` | `32` | maximum active DNS attempts or ASN preparation steps |
+| `-c`, `--concurrency` | `32` | maximum active DNS attempts |
 | `--rate` | `0` | maximum total DNS sends per second; 0 disables pacing |
 | `--resolver-rate` | `0` | maximum DNS sends per second per configured resolver; 0 disables pacing |
 | `-r`, `--retries` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
@@ -99,8 +99,11 @@ $ full-reverse -a 192.0.2.1
 Before calling the API, the tool loads every cached announced-prefixes
 response and indexes the prefixes they contain, so an IP covered by a cached
 AS prefix resolves without a network call. Prefixes learned from `AS` targets
-and from earlier lookups in the same run are indexed too, and API lookups are
-serialized to avoid duplicate work. Successful unknown-AS responses are also
+and from earlier lookups in the same run are indexed too, and prefix discovery is
+serialized to share newly learned prefixes without guessing their boundaries.
+Duplicate in-flight requests for an IP or ASN share their result, including
+failures; failures remain eligible for a later retry. Cached reads never wait
+for unrelated HTTP requests. Successful unknown-AS responses are also
 remembered for the duration of the run: a reported IPv4 prefix covering the
 queried address is reused for that prefix; otherwise only that address is
 remembered. Known ASN entries take precedence, and failed API requests remain
@@ -144,12 +147,21 @@ responses are never retried. Successful empty answers also complete without retr
 ### Scheduling and rate limits
 
 The engine enumerates addresses incrementally and admits at most `2 × -c`
-addresses at once. At most `-c` DNS attempts or ASN preparation steps are active;
+addresses at once. At most `-c` DNS attempts are active;
 a completed attempt releases its active slot before retrying or checking a PTR
 name's A record. Fresh work and retries alternate when both are queued, and
 ready resolvers are scheduled round-robin. A slow resolver retains its assigned
 addresses but does not prevent ready work for another resolver from starting.
-ASN API preparation still shares this work bound and serializes cache misses.
+With `-a`, four separate metadata workers enrich admitted addresses alongside
+DNS. A shared window of at most `max(64, 2 × -c)` addresses bounds unfinished
+DNS/metadata joins and their queues. A record becomes ready when both stages
+finish; metadata HTTP latency does not consume a DNS slot. If the window fills,
+admission pauses until a joined address completes. Cache hits bypass the
+metadata queue. Prefix discovery and AS-name HTTP requests each have a single
+independent lane (at most two enrichment HTTP requests at once). All admitted
+addresses needing metadata are enriched, including addresses with no PTR;
+only the same successful/error DNS records as before are emitted. Metadata
+failures warn and leave missing fields null without failing a DNS result.
 
 `--rate` limits all DNS sends together; `--resolver-rate` limits each configured
 resolver entry (the system nameserver list counts as one entry). When both are
@@ -172,7 +184,7 @@ for example, `--rate 100 --resolver-rate 50` caps total sends at 100/s and each
 configured entry at 50/s. These are example limits, not measured recommendations.
 
 Cancellation stops admission, cancels queued and active attempts, joins active
-workers, and closes the transport receivers. Completed output is retained;
+DNS and metadata workers, and closes the transport receivers. Completed output is retained;
 unfinished addresses do not produce fabricated failure records. A normal run
 drains every admitted address through completion before reporting its summary.
 

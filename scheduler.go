@@ -273,6 +273,15 @@ func (q *resolverQueue) task(canSend bool) (*scheduledTask, bool) {
 }
 
 func (s *taskScheduler) run(parent context.Context, source func() *scheduledTask) (schedulerStats, error) {
+	return s.runSource(parent, source, nil)
+}
+
+// runQueued accepts asynchronously produced work without blocking the actor's
+// receiver, pacing acknowledgements, or attempt completions during admission.
+func (s *taskScheduler) runQueued(parent context.Context, source <-chan *scheduledTask) (schedulerStats, error) {
+	return s.runSource(parent, nil, source)
+}
+func (s *taskScheduler) runSource(parent context.Context, source func() *scheduledTask, queued <-chan *scheduledTask) (schedulerStats, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	s.ctx = ctx
@@ -293,11 +302,21 @@ func (s *taskScheduler) run(parent context.Context, source func() *scheduledTask
 		}
 		return stats, err
 	}
+	admit := func(task *scheduledTask) error {
+		if task == nil || task.resolver < 0 || task.resolver >= len(s.queues) {
+			return fmt.Errorf("invalid task resolver")
+		}
+		s.queues[task.resolver].normal.push(task)
+		tracked++
+		stats.admitted++
+		stats.peakTracked = max(stats.peakTracked, tracked)
+		return nil
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stop(err)
 		}
-		for !sourceDone && tracked < 2*s.config.concurrency {
+		for source != nil && !sourceDone && tracked < 2*s.config.concurrency {
 			if ctx.Err() != nil {
 				break
 			}
@@ -306,13 +325,9 @@ func (s *taskScheduler) run(parent context.Context, source func() *scheduledTask
 				sourceDone = true
 				break
 			}
-			if task.resolver < 0 || task.resolver >= len(s.queues) {
-				return stop(fmt.Errorf("invalid task resolver"))
+			if err := admit(task); err != nil {
+				return stop(err)
 			}
-			s.queues[task.resolver].normal.push(task)
-			tracked++
-			stats.admitted++
-			stats.peakTracked = max(stats.peakTracked, tracked)
 		}
 		if sourceDone && tracked == 0 && s.pendingPermits == 0 {
 			return stats, nil
@@ -385,7 +400,17 @@ func (s *taskScheduler) run(parent context.Context, source func() *scheduledTask
 			timer.Reset(wake.Sub(s.clock.Now()))
 			tick = timer.C()
 		}
+		var input <-chan *scheduledTask
+		if !sourceDone && tracked < 2*s.config.concurrency {
+			input = queued
+		}
 		select {
+		case task, ok := <-input:
+			if !ok {
+				sourceDone = true
+			} else if err := admit(task); err != nil {
+				return stop(err)
+			}
 		case <-ctx.Done():
 			return stop(ctx.Err())
 		case result := <-completed:
