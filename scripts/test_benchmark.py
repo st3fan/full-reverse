@@ -2,7 +2,7 @@
 
 import unittest
 
-from benchmark import successful
+from benchmark import parse_samples, successful
 
 
 class ReportTests(unittest.TestCase):
@@ -39,6 +39,12 @@ class ReportTests(unittest.TestCase):
         report = self.report()
         report["samples"][0]["metrics"]["complete"] = 0
         self.assertFalse(successful(report, 3))
+
+    def test_split_output_events(self):
+        samples = parse_samples(["BenchmarkLookup/fast/c32-4\t", "1\t123 ns/op\t",
+                                 "1.000 complete\t456 B/op\n", "PASS\n"])
+        self.assertEqual(samples, [{"name": "BenchmarkLookup/fast/c32-4", "iterations": 1,
+                                   "metrics": {"ns/op": 123, "complete": 1, "B/op": 456}}])
 
 
 if __name__ == "__main__":

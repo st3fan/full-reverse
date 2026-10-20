@@ -20,6 +20,20 @@ def capture(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
 
 
+def parse_samples(chunks):
+    # go test -json can split a benchmark's name and metrics across Output
+    # events. Reassemble physical lines before parsing the report.
+    samples = []
+    for line in "".join(chunks).splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[0].startswith("Benchmark") and fields[1].isdigit():
+            metrics = {}
+            for index in range(2, len(fields) - 1, 2):
+                metrics[fields[index + 1]] = float(fields[index])
+            samples.append({"name": fields[0], "iterations": int(fields[1]), "metrics": metrics})
+    return samples
+
+
 def successful(report, count):
     samples = report["samples"]
     counts = Counter(s["name"] for s in samples)
@@ -82,13 +96,8 @@ def main():
         if output:
             report["output"].append(output)
             print(output, end="", flush=True)
-            fields = output.split()
-            if len(fields) >= 4 and fields[0].startswith("Benchmark") and fields[1].isdigit():
-                metrics = {}
-                for index in range(2, len(fields) - 1, 2):
-                    metrics[fields[index + 1]] = float(fields[index])
-                report["samples"].append({"name": fields[0], "iterations": int(fields[1]), "metrics": metrics})
     report["exit_code"] = process.wait()
+    report["samples"] = parse_samples(report["output"])
     # Go exits successfully even if a benchmark expression matches nothing.
     report["success"] = successful(report, args.count)
     report["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
