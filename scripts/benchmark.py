@@ -2,6 +2,7 @@
 """Run local lookup benchmarks and save revision, environment, metrics, and output."""
 
 import argparse
+from collections import Counter
 import datetime
 import json
 import os
@@ -17,6 +18,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def capture(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
+
+
+def successful(report, count):
+    samples = report["samples"]
+    counts = Counter(s["name"] for s in samples)
+    return (report["exit_code"] == 0 and not report["failed_events"] and bool(samples) and
+            all(n == count for n in counts.values()) and
+            all(s["metrics"].get("complete") == 1 for s in samples) and
+            not any("--- FAIL:" in line for line in report["output"]))
 
 
 def main():
@@ -52,6 +62,7 @@ def main():
         "command": shlex.join(command),
         "samples": [],
         "output": [],
+        "failed_events": [],
     }
     # Fixture setup, result validation, and counters live in the Go harness. A
     # mismatch fails go test; this wrapper never turns a failed run into a baseline.
@@ -66,6 +77,8 @@ def main():
             print(line, end="", flush=True)
             continue
         output = event.get("Output", "")
+        if event.get("Action") == "fail":
+            report["failed_events"].append(event)
         if output:
             report["output"].append(output)
             print(output, end="", flush=True)
@@ -77,8 +90,7 @@ def main():
                 report["samples"].append({"name": fields[0], "iterations": int(fields[1]), "metrics": metrics})
     report["exit_code"] = process.wait()
     # Go exits successfully even if a benchmark expression matches nothing.
-    report["success"] = (report["exit_code"] == 0 and bool(report["samples"]) and
-                         all(s["metrics"].get("complete") == 1 for s in report["samples"]))
+    report["success"] = successful(report, args.count)
     report["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("x") as file:

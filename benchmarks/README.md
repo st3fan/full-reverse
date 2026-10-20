@@ -11,7 +11,8 @@ The runner uses one full scan per sample (`-benchtime=1x`) and three samples per
 configuration. It records the exact command, UTC timestamps, Git revision and
 dirty state, Go/OS/architecture, CPU model/count, GOMAXPROCS setting, parsed
 metrics, and raw output. Existing reports are never overwritten. A failed check
-or an expression matching no benchmarks gives a nonzero exit status; inspect
+or an expression matching no benchmarks gives a nonzero exit status. Failed
+events/output and missing repeat samples are rejected even if Go exits zero; inspect
 `success` before treating a report as a baseline. Keep the host otherwise idle
 and use the same machine, Go version, settings, and harness when comparing revisions.
 

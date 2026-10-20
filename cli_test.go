@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,15 +26,29 @@ import (
 // Both protocols use the same local port to exercise production TCP fallback.
 func localDNS(t testing.TB, handler dns.HandlerFunc) string {
 	t.Helper()
-	udp, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	var tcp net.Listener
+	var udp net.PacketConn
+	// Select the TCP port first so the kernel avoids existing TCP listeners and
+	// TIME_WAIT connections. Retry if that port happens to be occupied by UDP.
+	for range 20 {
+		var err error
+		tcp, err = net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		udp, err = net.ListenPacket("udp4", tcp.Addr().String())
+		if err == nil {
+			break
+		}
+		_ = tcp.Close()
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+	if udp == nil {
+		t.Fatal("could not allocate a shared TCP/UDP fixture port")
 	}
 	t.Cleanup(func() { _ = udp.Close() })
-	tcp, err := net.Listen("tcp4", udp.LocalAddr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { _ = tcp.Close() })
 	for _, server := range []*dns.Server{
 		{PacketConn: udp, Handler: handler}, {Listener: tcp, Handler: handler},
