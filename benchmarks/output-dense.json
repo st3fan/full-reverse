@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "started_at": "2026-10-20T12:14:10.064872+00:00",
+  "revision": "797f9ced89c1ab1e5e15bdb7f3f1321b9ad77b65",
+  "source_dirty": false,
+  "environment": {
+    "CGO_ENABLED": "1",
+    "GOAMD64": "v1",
+    "GOARCH": "amd64",
+    "GOOS": "linux",
+    "GOTOOLCHAIN": "auto",
+    "GOVERSION": "go1.27.2",
+    "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "cpu_model": "Intel(R) N150",
+    "logical_cpus": 4,
+    "GOMAXPROCS": "default"
+  },
+  "command": "go test -run '^$' -bench '^BenchmarkJSONLOutput$' -benchtime=1x -count 3 -benchmem -timeout 10m -json .",
+  "samples": [
+    {
+      "name": "BenchmarkJSONLOutput/discard/direct-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 3663213.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 10000.0,
+        "B/op": 3544616.0,
+        "allocs/op": 30133.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/discard/direct-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 3380887.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 10000.0,
+        "B/op": 3541160.0,
+        "allocs/op": 30126.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/discard/direct-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 3476254.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 10000.0,
+        "B/op": 3534600.0,
+        "allocs/op": 30104.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/discard/buffered-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 6056097.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 20.0,
+        "B/op": 3607104.0,
+        "allocs/op": 30196.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/discard/buffered-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 7703824.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 20.0,
+        "B/op": 3598224.0,
+        "allocs/op": 30111.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/discard/buffered-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 7774636.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 20.0,
+        "B/op": 3604384.0,
+        "allocs/op": 30137.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/devnull/direct-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 11024188.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 10000.0,
+        "B/op": 3537256.0,
+        "allocs/op": 30115.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/devnull/direct-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 10668464.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 10000.0,
+        "B/op": 3548752.0,
+        "allocs/op": 30133.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/devnull/direct-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 10439410.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 10000.0,
+        "B/op": 3538616.0,
+        "allocs/op": 30118.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/devnull/buffered-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 6539311.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 20.0,
+        "B/op": 3610320.0,
+        "allocs/op": 30160.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/devnull/buffered-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 5702747.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 20.0,
+        "B/op": 3595840.0,
+        "allocs/op": 30103.0
+      }
+    },
+    {
+      "name": "BenchmarkJSONLOutput/devnull/buffered-4",
+      "iterations": 1,
+      "metrics": {
+        "ns/op": 5687783.0,
+        "bytes/op": 1250000.0,
+        "complete": 1.0,
+        "records/op": 10000.0,
+        "writes/op": 20.0,
+        "B/op": 3595264.0,
+        "allocs/op": 30099.0
+      }
+    }
+  ],
+  "output": [
+    "goos: linux\n",
+    "goarch: amd64\n",
+    "pkg: github.com/st3fan/full-reverse\n",
+    "cpu: Intel(R) N150\n",
+    "=== RUN   BenchmarkJSONLOutput\n",
+    "BenchmarkJSONLOutput\n",
+    "=== RUN   BenchmarkJSONLOutput/discard/direct\n",
+    "BenchmarkJSONLOutput/discard/direct\n",
+    "BenchmarkJSONLOutput/discard/direct-4         \t       1\t   3663213 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t     10000 writes/op\t 3544616 B/op\t   30133 allocs/op\n",
+    "BenchmarkJSONLOutput/discard/direct-4         \t       1\t   3380887 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t     10000 writes/op\t 3541160 B/op\t   30126 allocs/op\n",
+    "BenchmarkJSONLOutput/discard/direct-4         \t       1\t   3476254 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t     10000 writes/op\t 3534600 B/op\t   30104 allocs/op\n",
+    "=== RUN   BenchmarkJSONLOutput/discard/buffered\n",
+    "BenchmarkJSONLOutput/discard/buffered\n",
+    "BenchmarkJSONLOutput/discard/buffered-4       \t       1\t   6056097 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t        20.00 writes/op\t 3607104 B/op\t   30196 allocs/op\n",
+    "BenchmarkJSONLOutput/discard/buffered-4       \t       1\t   7703824 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t        20.00 writes/op\t 3598224 B/op\t   30111 allocs/op\n",
+    "BenchmarkJSONLOutput/discard/buffered-4       \t       1\t   7774636 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t        20.00 writes/op\t 3604384 B/op\t   30137 allocs/op\n",
+    "=== RUN   BenchmarkJSONLOutput/devnull/direct\n",
+    "BenchmarkJSONLOutput/devnull/direct\n",
+    "BenchmarkJSONLOutput/devnull/direct-4         \t       1\t  11024188 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t     10000 writes/op\t 3537256 B/op\t   30115 allocs/op\n",
+    "BenchmarkJSONLOutput/devnull/direct-4         \t       1\t  10668464 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t     10000 writes/op\t 3548752 B/op\t   30133 allocs/op\n",
+    "BenchmarkJSONLOutput/devnull/direct-4         \t       1\t  10439410 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t     10000 writes/op\t 3538616 B/op\t   30118 allocs/op\n",
+    "=== RUN   BenchmarkJSONLOutput/devnull/buffered\n",
+    "BenchmarkJSONLOutput/devnull/buffered\n",
+    "BenchmarkJSONLOutput/devnull/buffered-4       \t       1\t   6539311 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t        20.00 writes/op\t 3610320 B/op\t   30160 allocs/op\n",
+    "BenchmarkJSONLOutput/devnull/buffered-4       \t       1\t   5702747 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t        20.00 writes/op\t 3595840 B/op\t   30103 allocs/op\n",
+    "BenchmarkJSONLOutput/devnull/buffered-4       \t       1\t   5687783 ns/op\t   1250000 bytes/op\t         1.000 complete\t     10000 records/op\t        20.00 writes/op\t 3595264 B/op\t   30099 allocs/op\n",
+    "PASS\n",
+    "ok  \tgithub.com/st3fan/full-reverse\t0.096s\n"
+  ],
+  "failed_events": [],
+  "exit_code": 0,
+  "success": true,
+  "finished_at": "2026-10-20T12:14:10.500088+00:00"
+}

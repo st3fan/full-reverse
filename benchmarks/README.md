@@ -127,3 +127,6 @@ and scaling after introducing bounded attempt scheduling and optional pacing.
 
 The [ASN enrichment comparison](ENRICHMENT.md) records the cost and completeness
 of independently scheduled DNS and metadata work.
+
+The [buffered output comparison](OUTPUT.md) includes full-engine checks and a
+dense-result benchmark comparing per-record writes with the bounded writer.
