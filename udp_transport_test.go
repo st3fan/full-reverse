@@ -473,3 +473,18 @@ func TestUDPPortHistorySharedAcrossAliases(t *testing.T) {
 		t.Fatal("unused port rejected")
 	}
 }
+
+func TestDNSReplyNameCase(t *testing.T) {
+	q := dns.Question{Name: "k.Example.", Qtype: dns.TypePTR, Qclass: dns.ClassINET}
+	for _, tt := range []struct {
+		name string
+		want bool
+	}{
+		{"K.example.", true}, {"k.ExAmPlE.", true}, {"\u212a.example.", false}, {"other.example.", false},
+	} {
+		m := &dns.Msg{MsgHdr: dns.MsgHdr{Response: true}, Question: []dns.Question{{Name: tt.name, Qtype: q.Qtype, Qclass: q.Qclass}}}
+		if got := validDNSReply(q, 0, m); got != tt.want {
+			t.Errorf("%q matched = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}

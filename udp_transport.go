@@ -7,7 +7,6 @@ import (
 	mathrand "math/rand/v2"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 
@@ -240,8 +239,28 @@ func (t *udpTransport) exchange(parent context.Context, q *dns.Msg) (*dns.Msg, e
 
 func validDNSReply(question dns.Question, opcode int, response *dns.Msg) bool {
 	return response.Response && !response.Zero && response.Opcode == opcode && len(response.Question) == 1 &&
-		strings.EqualFold(response.Question[0].Name, question.Name) &&
+		equalDNSName(response.Question[0].Name, question.Name) &&
 		response.Question[0].Qtype == question.Qtype && response.Question[0].Qclass == question.Qclass
+}
+
+// DNS case insensitivity applies to ASCII A-Z, not Unicode case folding.
+func equalDNSName(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		x, y := a[i], b[i]
+		if x >= 'A' && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if y >= 'A' && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *udpTransport) accept(s *udpSession, peer netip.AddrPort, response *dns.Msg) {
