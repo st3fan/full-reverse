@@ -29,7 +29,7 @@ when `GOBIN` is unset (normally `$HOME/go/bin`). Add that directory to your
 full-reverse [OPTIONS] [CIDR|IP|ASN|AS-NAME|FILE...]
 ```
 
-Every option has a short and a long form (e.g. `-d` / `--dns-server`), and
+Most options have a short and a long form (e.g. `-d` / `--dns-server`), and
 options may appear before or after positional targets. Run `full-reverse -h`
 to list them.
 
@@ -47,7 +47,9 @@ accepted.
 | `-i`, `--input` | – | read targets from a file, one per line; use `-` for stdin; may be repeated |
 | `-a`, `--lookup-as` | `false` | look up the announcing ASN for IPs whose ASN is not already known |
 | `-d`, `--dns-server` | `/etc/resolv.conf` | DNS server to query, e.g. `8.8.8.8` or `8.8.8.8:53`; may be repeated |
-| `-c`, `--concurrency` | `32` | number of concurrent reverse lookups |
+| `-c`, `--concurrency` | `32` | maximum active DNS attempts or ASN preparation steps |
+| `--rate` | `0` | maximum total DNS sends per second; 0 disables pacing |
+| `--resolver-rate` | `0` | maximum DNS sends per second per configured resolver; 0 disables pacing |
 | `-r`, `--retries` | `4` | retries for timeouts and I/O errors; NXDOMAIN is never retried |
 | `-t`, `--timeout` | `2.5s` | timeout per attempt |
 | `-q`, `--quiet` | `false` | silence progress and summary logging |
@@ -137,7 +139,42 @@ for query limits, socket rotation, and shutdown behavior.
 
 A failed lookup is retried up to `-r` times (so the default of `4` means at
 most 5 attempts). Each attempt has its own `-t` timeout. NXDOMAIN / no-such-host
-responses are never retried.
+responses are never retried. Successful empty answers also complete without retrying.
+
+### Scheduling and rate limits
+
+The engine enumerates addresses incrementally and admits at most `2 × -c`
+addresses at once. At most `-c` DNS attempts or ASN preparation steps are active;
+a completed attempt releases its active slot before retrying or checking a PTR
+name's A record. Fresh work and retries alternate when both are queued, and
+ready resolvers are scheduled round-robin. A slow resolver retains its assigned
+addresses but does not prevent ready work for another resolver from starting.
+ASN API preparation still shares this work bound and serializes cache misses.
+
+`--rate` limits all DNS sends together; `--resolver-rate` limits each configured
+resolver entry (the system nameserver list counts as one entry). When both are
+set, each send must satisfy both limits. Retries, A queries, system nameserver
+fallback, and TCP fallback all consume the same budgets. Duplicate `-d` entries
+have separate per-entry limits; use `--rate` to cap their combined load. Sends
+are spaced evenly, with no accumulated credit or catch-up burst after a pause.
+RIPE Stat HTTP requests do not consume the DNS budget.
+
+The initial pacing wait is outside an attempt's `-t` timeout. Once that attempt
+starts, its remaining deadline includes any system nameserver or TCP fallback
+and their pacing waits. Each retry gets a fresh timeout after its initial send
+grant. A rate limit therefore bounds sends independently of `-c`; it does not
+change retry counts or introduce resolver failover.
+
+Both rate controls default to `0`, preserving existing unpaced behavior and
+baseline completeness. Local fixture measurements do not establish a safe rate
+for a remote resolver. Set explicit limits to match your resolver's capacity;
+for example, `--rate 100 --resolver-rate 50` caps total sends at 100/s and each
+configured entry at 50/s. These are example limits, not measured recommendations.
+
+Cancellation stops admission, cancels queued and active attempts, joins active
+workers, and closes the transport receivers. Completed output is retained;
+unfinished addresses do not produce fabricated failure records. A normal run
+drains every admitted address through completion before reporting its summary.
 
 ### Forward-confirmed PTR records
 
