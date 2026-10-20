@@ -154,6 +154,8 @@ lookup. NXDOMAIN or a failed forward lookup counts as not confirmed.
 JSONL on stdout. Progress and a final summary are logged to stderr, each line
 prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone;
 `-q`/`--quiet` silences these log lines (fatal errors are still printed).
+Ctrl+C cancels input reading and pending lookups. Cancellation and output write
+failures terminate the run with a nonzero exit status.
 The run starts with a line stating how many IPs will be looked up. Each ASN
 expands to a line listing all of its announced IPv4 prefixes. For runs larger
 than a /24, an intermediate progress line is emitted for every 256 IPs scanned,

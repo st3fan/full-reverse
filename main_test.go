@@ -14,7 +14,7 @@ import (
 )
 
 func TestResolveTargets(t *testing.T) {
-	targets, err := resolveTargets(context.Background(), ripestat.New(), []string{"1.1.1.1", "10.0.0.7/24"})
+	targets, err := resolveTargets(context.Background(), ripestat.New(), []string{"1.1.1.1", "10.0.0.7/24"}, nil)
 	if err != nil {
 		t.Fatalf("resolveTargets: %v", err)
 	}
