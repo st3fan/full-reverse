@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,10 +18,13 @@ import (
 // per-resolver metrics. A resolver with multiple servers (the system
 // configuration) tries them in order until one answers.
 type dnsResolver struct {
-	name    string
-	servers []string
-	udp     *dns.Client
-	tcp     *dns.Client
+	name       string
+	servers    []string
+	tcp        *dns.Client
+	tcpSlots   chan struct{}
+	mu         sync.Mutex
+	transports map[string]*udpTransport
+	closed     bool
 
 	requests atomic.Uint64
 	errors   atomic.Uint64
@@ -45,6 +49,9 @@ func (d *dnsResolver) query(ctx context.Context, name string, qtype uint16) (*dn
 
 	var lastErr error
 	for _, server := range d.servers {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		resp, err := d.exchange(ctx, msg, server)
 		if err == nil {
 			return resp, nil
@@ -60,14 +67,27 @@ func (d *dnsResolver) query(ctx context.Context, name string, qtype uint16) (*dn
 // exchange sends msg to server over UDP, retrying over TCP if the response is
 // truncated, and maps the response code to an error.
 func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string) (*dns.Msg, error) {
-	resp, _, err := exchangeContext(ctx, d.udp, msg, server)
+	transport, err := d.transport(server)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := transport.exchange(ctx, msg)
 	if err != nil {
 		return nil, fmt.Errorf("query %s on %s: %w", msg.Question[0].Name, server, err)
 	}
 	if resp.Truncated {
+		select {
+		case d.tcpSlots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 		resp, _, err = exchangeContext(ctx, d.tcp, msg, server)
+		<-d.tcpSlots
 		if err != nil {
 			return nil, fmt.Errorf("query %s on %s (tcp): %w", msg.Question[0].Name, server, err)
+		}
+		if resp.Id != msg.Id || !validDNSReply(msg.Question[0], msg.Opcode, resp) || resp.Truncated {
+			return nil, fmt.Errorf("query %s on %s (tcp): invalid or truncated DNS response", msg.Question[0].Name, server)
 		}
 	}
 
@@ -78,6 +98,34 @@ func (d *dnsResolver) exchange(ctx context.Context, msg *dns.Msg, server string)
 		return nil, errNotFound
 	default:
 		return nil, fmt.Errorf("query %s on %s: %s", msg.Question[0].Name, server, dns.RcodeToString[resp.Rcode])
+	}
+}
+
+func (d *dnsResolver) transport(server string) (*udpTransport, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, net.ErrClosed
+	}
+	if d.transports == nil {
+		d.transports = make(map[string]*udpTransport)
+	}
+	if d.transports[server] == nil {
+		d.transports[server] = newUDPTransport(server)
+	}
+	return d.transports[server], nil
+}
+
+func (d *dnsResolver) close() {
+	d.mu.Lock()
+	d.closed = true
+	transports := make([]*udpTransport, 0, len(d.transports))
+	for _, transport := range d.transports {
+		transports = append(transports, transport)
+	}
+	d.mu.Unlock()
+	for _, transport := range transports {
+		transport.close()
 	}
 }
 
@@ -204,9 +252,9 @@ func systemServers() ([]string, error) {
 
 func newDNSResolver(name string, servers []string, timeout time.Duration) *dnsResolver {
 	return &dnsResolver{
-		name:    name,
-		servers: servers,
-		udp:     &dns.Client{Net: "udp", Timeout: timeout, DialTimeout: timeout},
-		tcp:     &dns.Client{Net: "tcp", Timeout: timeout, DialTimeout: timeout},
+		name:     name,
+		servers:  servers,
+		tcp:      &dns.Client{Net: "tcp", Timeout: timeout, DialTimeout: timeout},
+		tcpSlots: make(chan struct{}, maxPendingDNS),
 	}
 }

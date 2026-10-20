@@ -59,6 +59,11 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 	if len(resolvers) == 0 {
 		return fmt.Errorf("no DNS resolvers configured")
 	}
+	defer func() {
+		for _, resolver := range resolvers {
+			resolver.close()
+		}
+	}()
 
 	// Expand the mixed list of CIDRs, IPs, and ASNs into scan targets.
 	client := services.ripe

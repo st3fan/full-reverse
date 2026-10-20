@@ -131,6 +131,10 @@ When multiple `-d` servers are given, lookups are assigned to them in
 round-robin order; retries stay on the assigned server. Truncated UDP responses
 are retried over TCP.
 
+UDP queries share persistent sockets per resolver endpoint, with validation of
+reply sources, IDs, and questions. See the [transport design](docs/dns-transport.md)
+for query limits, socket rotation, and shutdown behavior.
+
 A failed lookup is retried up to `-r` times (so the default of `4` means at
 most 5 attempts). Each attempt has its own `-t` timeout. NXDOMAIN / no-such-host
 responses are never retried.
