@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/st3fan/full-reverse/ripestat"
 )
@@ -137,5 +138,120 @@ func TestASNResolverErrorsAreRetried(t *testing.T) {
 				t.Fatalf("API calls = %d, want 2", calls.Load())
 			}
 		})
+	}
+}
+
+func TestASNResolverCachedReadAndIndependentRequestLanes(t *testing.T) {
+	prefixStarted, nameStarted := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
+	var prefixCalls, nameCalls atomic.Int64
+	r := testASNResolver(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Query().Get("resource") == "AS64500" {
+			if nameCalls.Add(1) == 1 {
+				close(nameStarted)
+			}
+			select {
+			case <-release:
+			case <-req.Context().Done():
+				return
+			}
+			fmt.Fprint(w, `{"status":"ok","data":{"holder":"FETCHED - Example"}}`)
+		} else {
+			if prefixCalls.Add(1) == 1 {
+				close(prefixStarted)
+			}
+			select {
+			case <-release:
+			case <-req.Context().Done():
+				return
+			}
+			fmt.Fprint(w, `{"status":"ok","data":{"resource":"192.0.2.0/24","asns":[]}}`)
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	r.index.add(netip.MustParsePrefix("198.51.100.0/24"), 64500)
+	r.index.add(netip.MustParsePrefix("203.0.113.0/24"), 64501)
+	r.names = map[uint32]ripestat.ASInfo{64501: {Name: "CACHED"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	start := func(ip string) { wg.Go(func() { r.resolve(ctx, netip.MustParseAddr(ip)) }) }
+	start("198.51.100.1")
+	awaitSignal(t, nameStarted)
+	start("192.0.2.1")
+	awaitSignal(t, prefixStarted) // A blocked AS-name request must not block discovery.
+	cached := make(chan uint32, 1)
+	go func() { asn, _, _ := r.resolve(ctx, netip.MustParseAddr("203.0.113.1")); cached <- asn }()
+	select {
+	case asn := <-cached:
+		if asn != 64501 {
+			t.Fatal(asn)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cache read waited for HTTP")
+	}
+	for range 16 {
+		start("198.51.100.2")
+		start("192.0.2.1")
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	awaitSignal(t, done)
+	if nameCalls.Load() != 1 || prefixCalls.Load() != 1 {
+		t.Fatalf("calls name=%d prefix=%d", nameCalls.Load(), prefixCalls.Load())
+	}
+}
+
+func TestASNResolverNameFailureIsNotCached(t *testing.T) {
+	var calls atomic.Int64
+	r := testASNResolver(t, func(w http.ResponseWriter, req *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok","data":{"holder":"EXAMPLE - Example"}}`)
+	})
+	r.index.add(netip.MustParsePrefix("192.0.2.0/24"), 64500)
+	for i := range 3 {
+		asn, info, prefix := r.resolve(context.Background(), netip.MustParseAddr("192.0.2.1"))
+		if asn != 64500 || prefix.String() != "192.0.2.0/24" || (i == 0 && info.Name != "") || (i > 0 && info.Name != "EXAMPLE") {
+			t.Fatalf("attempt %d: %d %+v %v", i, asn, info, prefix)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("calls=%d, want 2", calls.Load())
+	}
+}
+
+func TestASNResolverCanceledDiscoveryDoesNotCacheUnknown(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int64
+	r := testASNResolver(t, func(w http.ResponseWriter, req *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-req.Context().Done()
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok","data":{"resource":"192.0.2.0/24","asns":[{"asn":64500,"holder":"EXAMPLE - Example"}]}}`)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.resolve(ctx, netip.MustParseAddr("192.0.2.1")); close(done) }()
+	awaitSignal(t, started)
+	cancel()
+	awaitSignal(t, done)
+	asn, info, _ := r.resolve(context.Background(), netip.MustParseAddr("192.0.2.1"))
+	if asn != 64500 || info.Name != "EXAMPLE" || calls.Load() != 2 {
+		t.Fatalf("retry: %d %+v calls=%d", asn, info, calls.Load())
+	}
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fixture")
 	}
 }
