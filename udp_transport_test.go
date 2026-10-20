@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,8 +403,8 @@ func TestUDPTransportReceiveFailureRecovery(t *testing.T) {
 func TestUDPTransportPortExhaustion(t *testing.T) {
 	f := rawDNS(t, "udp4", "127.0.0.1:0")
 	tr := testUDPTransport(t, f)
-	for i := range tr.ports {
-		tr.ports[i] = ^uint64(0)
+	for i := range tr.ports.bits {
+		tr.ports.bits[i] = ^uint64(0)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -440,5 +441,35 @@ func TestUDPTransportConcurrentClose(t *testing.T) {
 	wg.Wait()
 	if r := awaitDNS(t, done); r.err == nil {
 		t.Fatal("query succeeded after close")
+	}
+}
+
+func TestUDPPortHistorySharedAcrossAliases(t *testing.T) {
+	history := &udpPortHistory{}
+	var wg sync.WaitGroup
+	var claims atomic.Int64
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if history.claim(12345) {
+				claims.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if claims.Load() != 1 {
+		t.Fatal("port claimed more than once")
+	}
+	first := newUDPTransportWithPorts("127.0.0.1:53", history)
+	defer first.close()
+	second := newUDPTransportWithPorts("localhost:53", history)
+	defer second.close()
+	first.close()
+	if second.ports.claim(12345) {
+		t.Fatal("alias reused a port after the original transport closed")
+	}
+	if !second.ports.claim(12346) {
+		t.Fatal("unused port rejected")
 	}
 }

@@ -39,11 +39,29 @@ type udpSession struct {
 	done    chan struct{}
 }
 
+// Share history across every endpoint in one engine run. Different configured
+// names can resolve to the same peer, so per-name histories are insufficient.
+type udpPortHistory struct {
+	mu   sync.Mutex
+	bits [dnsIDCount / 64]uint64
+}
+
+func (h *udpPortHistory) claim(port uint16) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	bit := uint64(1) << (port % 64)
+	if h.bits[port/64]&bit != 0 {
+		return false
+	}
+	h.bits[port/64] |= bit
+	return true
+}
+
 // udpTransport owns one live UDP socket per endpoint (two briefly during
 // rotation). IDs are randomly permuted and used once per socket, including
 // timed-out and canceled attempts. Socket rotation waits for pending queries to
-// drain. A fixed bitmap prevents local-port reuse for this endpoint during the
-// run, so even an arbitrarily late reply to an identical question cannot match
+// drain. Shared fixed-size history prevents local-port reuse during the run,
+// so even an arbitrarily late reply to an identical question cannot match
 // a new query after ID-space rotation. Port exhaustion fails visibly.
 type udpTransport struct {
 	server    string
@@ -52,7 +70,7 @@ type udpTransport struct {
 	slots     chan struct{}
 	mu        sync.Mutex
 	session   *udpSession
-	ports     [dnsIDCount / 64]uint64
+	ports     *udpPortHistory
 	idCount   int // production: full ID space; smaller values allow exhaustion tests
 	changed   chan struct{}
 	closed    bool
@@ -60,9 +78,16 @@ type udpTransport struct {
 }
 
 func newUDPTransport(server string) *udpTransport {
+	return newUDPTransportWithPorts(server, &udpPortHistory{})
+}
+
+func newUDPTransportWithPorts(server string, ports *udpPortHistory) *udpTransport {
+	if ports == nil {
+		ports = &udpPortHistory{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &udpTransport{server: server, ctx: ctx, cancel: cancel,
-		slots: make(chan struct{}, maxPendingDNS), idCount: dnsIDCount, changed: make(chan struct{})}
+		slots: make(chan struct{}, maxPendingDNS), ports: ports, idCount: dnsIDCount, changed: make(chan struct{})}
 }
 
 // notifyLocked wakes ID-space waiters whenever pending work or socket state changes.
@@ -78,8 +103,7 @@ func (t *udpTransport) openLocked(ctx context.Context) (*udpSession, error) {
 		}
 		udp := conn.(*net.UDPConn)
 		port := uint16(udp.LocalAddr().(*net.UDPAddr).Port)
-		bit := uint64(1) << (port % 64)
-		if t.ports[port/64]&bit != 0 {
+		if !t.ports.claim(port) {
 			_ = udp.Close()
 			continue
 		}
@@ -98,7 +122,6 @@ func (t *udpTransport) openLocked(ctx context.Context) (*udpSession, error) {
 		}
 		rng := mathrand.New(mathrand.NewChaCha8(seed))
 		rng.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
-		t.ports[port/64] |= bit
 		return &udpSession{conn: udp, peer: udp.RemoteAddr().(*net.UDPAddr).AddrPort(),
 			ids: ids[:t.idCount], pending: make(map[uint16]*pendingDNS), writes: make(chan struct{}, 1), done: make(chan struct{})}, nil
 	}
