@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -486,5 +487,40 @@ func TestDNSReplyNameCase(t *testing.T) {
 		if got := validDNSReply(q, 0, m); got != tt.want {
 			t.Errorf("%q matched = %v, want %v", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestUDPTransportRefusedPeerRecovery(t *testing.T) {
+	f := rawDNS(t, "udp4", "127.0.0.1:0")
+	address := f.conn.LocalAddr().String()
+	tr := testUDPTransport(t, f)
+	_ = f.conn.Close()
+	<-f.done
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for range 3 {
+		done := asyncExchange(ctx, tr, "1.2.0.192.in-addr.arpa.")
+		r := awaitDNS(t, done)
+		if !errors.Is(r.err, syscall.ECONNREFUSED) && !errors.Is(r.err, syscall.ECONNRESET) {
+			t.Fatalf("expected refusal from closed local UDP port: %v", r.err)
+		}
+	}
+	tr.mu.Lock()
+	s := tr.session
+	port := s.conn.LocalAddr().(*net.UDPAddr).Port
+	consumed := s.next
+	tr.mu.Unlock()
+	if consumed != 3 {
+		t.Fatal("refusal unnecessarily rotated the socket")
+	}
+	ready := rawDNS(t, "udp4", address)
+	done := asyncExchange(ctx, tr, "1.2.0.192.in-addr.arpa.")
+	q := ready.request(t)
+	if int(q.peer.Port()) != port {
+		t.Fatal("recovered peer did not reuse the existing socket")
+	}
+	ready.reply(t, q, nil)
+	if r := awaitDNS(t, done); r.err != nil {
+		t.Fatal(r.err)
 	}
 }

@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	mathrand "math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -287,16 +289,28 @@ func (t *udpTransport) receive(s *udpSession) {
 	for {
 		n, peer, err := s.conn.ReadFromUDPAddrPort(packet)
 		if err != nil {
+			// An ICMP refusal/reset does not close a connected UDP socket.
+			// Surface the failure to pending calls but keep receiving, rather
+			// than consuming a fresh source port for every retry of a down peer.
+			recoverable := errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET)
+			keepReading := false
 			t.mu.Lock()
 			if t.session == s && !t.closed {
-				s.err = fmt.Errorf("receive DNS from %s: %w", t.server, err)
+				failure := fmt.Errorf("receive DNS from %s: %w", t.server, err)
+				if !recoverable {
+					s.err = failure
+				}
+				keepReading = recoverable
 				for id, p := range s.pending {
 					delete(s.pending, id)
-					p.reply <- dnsReply{err: s.err}
+					p.reply <- dnsReply{err: failure}
 				}
 				t.notifyLocked()
 			}
 			t.mu.Unlock()
+			if keepReading {
+				continue
+			}
 			return
 		}
 		response := new(dns.Msg)
