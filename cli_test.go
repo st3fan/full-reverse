@@ -23,7 +23,7 @@ import (
 )
 
 // Both protocols use the same local port to exercise production TCP fallback.
-func localDNS(t *testing.T, handler dns.HandlerFunc) string {
+func localDNS(t testing.TB, handler dns.HandlerFunc) string {
 	t.Helper()
 	udp, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
