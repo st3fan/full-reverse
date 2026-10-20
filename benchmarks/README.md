@@ -1,5 +1,8 @@
 # Lookup benchmarks
 
+The [initial baseline](BASELINE.md) includes checked three-sample reports for the
+current engine, before any persistent-socket or scheduling redesign.
+
 Run from the repository root with Python 3 and the Go version required by `go.mod`:
 
 ```sh
@@ -40,7 +43,8 @@ also runs in ordinary `go test ./...` using a smaller prefix.
 
 Each throughput scan contains 256 addresses (`192.0.2.0/24`), with concurrency
 32, 64, 128, and 256, a 250ms attempt timeout, and one retry. These are benchmark
-settings, not proposed CLI defaults. PTR names encode the original IPv4 address.
+settings, not proposed CLI defaults. Logging is quiet (`-q` semantics). PTR names
+encode the original IPv4 address.
 
 | Scenario | Fixture behavior | Expected per scan |
 | --- | --- | --- |
@@ -108,3 +112,10 @@ Loopback results do not predict internet throughput or the best resolver limits.
 Any real-network benchmark requires agreed targets/resolvers and a publication
 policy. When doing one, distinguish a cold recursive resolver cache from warm
 cached DNS responses, as well as cold/warm RIPE metadata caches.
+
+The report runner's failure-detection and split-output parsing regressions can be
+checked with:
+
+```sh
+python3 -B -m unittest discover -s scripts
+```
