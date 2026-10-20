@@ -80,3 +80,5 @@ Existing CLI and synthetic benchmark fixtures also run unchanged.
 Use the [benchmark runner](../benchmarks/README.md) to compare this transport with
 the committed baseline. Those measurements include initial socket/ID-pool setup
 and local fixture/verifier overhead, and do not predict internet performance.
+The [measured comparison](../benchmarks/UDP-TRANSPORT.md) includes all throughput
+configurations, scaling results, and raw samples.

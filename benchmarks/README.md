@@ -2,6 +2,8 @@
 
 The [initial baseline](BASELINE.md) includes checked three-sample reports for the
 current engine, before any persistent-socket or scheduling redesign.
+The [persistent UDP comparison](UDP-TRANSPORT.md) records the first transport
+change against that baseline, with unchanged workloads and completeness checks.
 
 Run from the repository root with Python 3 and the Go version required by `go.mod`:
 
