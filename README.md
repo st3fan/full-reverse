@@ -189,3 +189,8 @@ prefix, e.g.:
 ```json
 {"ip":"193.0.19.4","target":"AS3333","prefix":"193.0.18.0/23","asn":3333,"as_name":"RIPE-NCC-AS Reseaux IP Europeens Network Coordination Centre (RIPE NCC)","as_org":null,"ptr":["web.admindns.ripe.net"]}
 ```
+
+## Benchmarks
+
+For repeatable local performance and completeness checks, see the
+[lookup benchmark guide](benchmarks/README.md).
