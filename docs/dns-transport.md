@@ -34,15 +34,17 @@ the pending set to empty, then rotate to a new socket before sending. Waiting
 respects cancellation and the attempt deadline.
 
 The replacement is opened while the previous socket is still bound. A fixed
-65,536-bit bitmap rejects previously used source ports for that endpoint during
-the run, including ports from failed sessions. Thus repeated identical questions
+65,536-bit bitmap shared across the run rejects previously used source ports,
+including ports from failed sessions and other resolver aliases. Thus repeated
+identical questions
 cannot accept an older attempt's reply merely because an ID was reused, even
 after rotation. Failed attempts to choose a fresh source port stop after 64
 tries and return an error; the transport never silently relaxes this rule.
 
 There are at most 1,024 active transport calls per endpoint, one live socket
 (two briefly during rotation), a bounded pending map, an approximately 128KiB ID
-pool, and an 8KiB port-history bitmap. Retired ID pools are released. The socket
+pool; all transports share one 8KiB port-history bitmap. Retired ID pools are
+released. The socket
 requests a 4MiB receive buffer; the operating system may cap the actual size.
 These limits are implementation bounds, not new CLI concurrency defaults.
 The OS ephemeral-port range and ports used elsewhere on the host limit how many

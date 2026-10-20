@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -155,6 +156,32 @@ func TestEngineClosesPersistentSockets(t *testing.T) {
 			default:
 				t.Fatal("receiver not joined")
 			}
+		}
+	}
+}
+
+func TestEngineSharesSourcePortHistory(t *testing.T) {
+	addr := localDNS(t, ptrReply)
+	var resolvers []*dnsResolver
+	services := cliServices{resolvers: func(_ []string, timeout time.Duration) ([]*dnsResolver, error) {
+		resolvers = []*dnsResolver{newDNSResolver("first alias", []string{addr}, timeout), newDNSResolver("second alias", []string{addr}, timeout)}
+		return resolvers, nil
+	}}
+	err := runLookups(context.Background(), lookupOptions{concurrency: 1, timeout: time.Second, quiet: true}, []string{"192.0.2.0/30"}, io.Discard, io.Discard, services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvers[0].ports == nil || resolvers[0].ports != resolvers[1].ports {
+		t.Fatal("resolver aliases have independent port histories")
+	}
+	for _, resolver := range resolvers {
+		transport := resolver.transports[addr]
+		if transport == nil || transport.ports != resolver.ports {
+			t.Fatal("endpoint does not share run history")
+		}
+		port := uint16(transport.session.conn.LocalAddr().(*net.UDPAddr).Port)
+		if resolver.ports.claim(port) {
+			t.Fatal("closed resolver port was not retired")
 		}
 	}
 }

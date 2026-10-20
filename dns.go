@@ -24,6 +24,7 @@ type dnsResolver struct {
 	tcpSlots   chan struct{}
 	mu         sync.Mutex
 	transports map[string]*udpTransport
+	ports      *udpPortHistory
 	closed     bool
 
 	requests atomic.Uint64
@@ -111,7 +112,10 @@ func (d *dnsResolver) transport(server string) (*udpTransport, error) {
 		d.transports = make(map[string]*udpTransport)
 	}
 	if d.transports[server] == nil {
-		d.transports[server] = newUDPTransport(server)
+		if d.ports == nil {
+			d.ports = &udpPortHistory{}
+		}
+		d.transports[server] = newUDPTransportWithPorts(server, d.ports)
 	}
 	return d.transports[server], nil
 }
