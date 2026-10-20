@@ -34,7 +34,7 @@ type lookupOptions struct {
 	lookupAS, forwardConfirmedOnly, quiet bool
 }
 
-func runLookups(parent context.Context, opts lookupOptions, inputs []string, stdout, stderr io.Writer, services cliServices) error {
+func runLookups(parent context.Context, opts lookupOptions, inputs []string, stdout, stderr io.Writer, services cliServices) (runErr error) {
 	if opts.concurrency < 1 {
 		return fmt.Errorf("concurrency must be >= 1")
 	}
@@ -49,7 +49,12 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	out := &runOutput{stdout: stdout, stderr: stderr, quiet: opts.quiet, cancel: cancel}
+	out := newRunOutput(ctx, stdout, stderr, opts.quiet, cancel)
+	defer func() {
+		if err := out.finish(); err != nil {
+			runErr = err
+		}
+	}()
 	if services.resolvers == nil {
 		services.resolvers = buildResolvers
 	}
@@ -125,6 +130,9 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 		}
 	}
 	scheduleErr := runLookupPipeline(ctx, scheduler, targets, resolvers, opts, asnRes, progress)
+	// Flush all accepted JSONL before declaring the run complete. A final write
+	// failure takes precedence over cancellation or a successful DNS schedule.
+	out.finish()
 
 	if err := out.failure(); err != nil {
 		return err

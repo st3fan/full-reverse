@@ -209,6 +209,20 @@ prefixed with an RFC 3339 (ISO 8601) timestamp in the system's local timezone;
 `-q`/`--quiet` silences these log lines (fatal errors are still printed).
 Ctrl+C cancels input reading and pending lookups. Cancellation and output write
 failures terminate the run with a nonzero exit status.
+Stdout has one writer with 64 queued record slots and a 64 KiB byte buffer.
+Full buffers flush as needed; a 100 ms timer flushes partial buffers during a
+scan. Producers apply backpressure when the queue fills. Records remain in
+completion order, with no sorting or accumulation of the whole scan. Stderr
+diagnostics are written immediately and independently of the stdout buffer.
+
+Normal completion and cancellation join producers, drain all accepted JSONL
+records, flush stdout, and wait for underlying writes to finish. Cancellation
+can reject records that have not entered the queue; incomplete lookups do not
+produce failure records. Any write, short-write, or final-flush failure cancels
+pending work and returns a nonzero status. Once stdout fails, queued records
+cannot be delivered; that failure is reported instead of silently succeeding.
+The success summary is logged only after the final stdout flush succeeds.
+
 The run starts with a line stating how many IPs will be looked up. Each ASN
 expands to a line listing all of its announced IPv4 prefixes. For runs larger
 than a /24, an intermediate progress line is emitted for every 256 IPs scanned,
