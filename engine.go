@@ -59,6 +59,19 @@ func runLookups(parent context.Context, opts lookupOptions, inputs []string, std
 	if len(resolvers) == 0 {
 		return fmt.Errorf("no DNS resolvers configured")
 	}
+	// Different configured names (or repeated -d flags) can reach the same
+	// endpoint. Retire source ports across the whole run, not just one alias.
+	ports := &udpPortHistory{}
+	for _, resolver := range resolvers {
+		resolver.mu.Lock()
+		resolver.ports = ports
+		resolver.mu.Unlock()
+	}
+	defer func() {
+		for _, resolver := range resolvers {
+			resolver.close()
+		}
+	}()
 
 	// Expand the mixed list of CIDRs, IPs, and ASNs into scan targets.
 	client := services.ripe
