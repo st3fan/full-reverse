@@ -21,8 +21,9 @@ unmatched, and duplicate packets are ignored without completing a lookup.
 The UDP transport owns wire IDs; callers' messages are copied before assigning
 them. A buffered reply channel lets the receiver finish without waiting for the
 query goroutine. Pending entries are removed after a valid reply, cancellation,
-or timeout. A receive failure wakes affected calls with an error; a subsequent
-attempt can open a replacement socket. Normal lookup retries and nameserver
+or timeout. A receive failure wakes affected calls with an error. ICMP refusal
+and reset errors keep the socket reusable; terminal failures open a replacement
+on a subsequent attempt. Normal lookup retries and nameserver
 fallback still decide how to handle those errors.
 
 ## ID lifetime and bounds
@@ -38,7 +39,9 @@ The replacement is opened while the previous socket is still bound. A fixed
 including ports from failed sessions and other resolver aliases. Thus repeated
 identical questions
 cannot accept an older attempt's reply merely because an ID was reused, even
-after rotation. Failed attempts to choose a fresh source port stop after 64
+after rotation, using socket tuples as seen by this host. Network devices that
+rewrite/reuse those tuples are outside the transport's control. Failed attempts
+to choose a fresh source port stop after 64
 tries and return an error; the transport never silently relaxes this rule.
 
 There are at most 1,024 active transport calls per endpoint, one live socket
