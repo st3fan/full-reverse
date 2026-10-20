@@ -7,7 +7,7 @@ address using github.com/miekg/dns, and writes one JSON object per address
 
 ## Install
 
-Requires Go 1.27.1 or later.
+Requires Go 1.27.2 or later.
 
 ```sh
 go install github.com/st3fan/full-reverse@latest
